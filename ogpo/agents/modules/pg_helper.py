@@ -395,7 +395,7 @@ def compute_flow_log_prob(
         entropy_rate = None
 
     if normalize_horizon:
-        logprob = logprob / logprob_steps
+        logprob = logprob / max(logprob_steps, 1)
 
     if normalize_dim:
         logprob = logprob / act_dim

@@ -108,3 +108,5 @@ plan.md
 
 exp/
 checkpoints/
+ref_papers/
+tests/

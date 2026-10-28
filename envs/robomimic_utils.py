@@ -429,24 +429,22 @@ class RobomimicLowdimWrapper(gym.Env):
             video_img = self.render(mode="rgb_array")
             self.video_writer.append_data(video_img)
 
-        # Success / post-success reward shaping
+        # Success detection preserves the paper's sparse rewards: -1 / 0.
         is_success_step = reward > -0.5
 
         if self.t_succ is None:
             if is_success_step:
                 self.t_succ = self.t
                 info["success"] = 1
-                reward += 5.0
+                # Successful steps retain reward 0.
                 if self.post_success_steps <= 0:
                     done = True
             else:
                 info["success"] = 0
         else:
-            # Post-success phase
+            # Post-success handling changes termination only, not rewards.
             info["success"] = 1
             steps_since_succ = self.t - self.t_succ
-            if is_success_step and steps_since_succ <= self.post_success_steps:
-                reward += 5.0
             if steps_since_succ >= self.post_success_steps or not is_success_step:
                 done = True
 
@@ -664,24 +662,22 @@ class RobomimicImageWrapper(gym.Env):
             self.video_writer.append_data(video_img)
 
 
-        # Success / post-success reward shaping
+        # Success detection preserves the paper's sparse rewards: -1 / 0.
         is_success_step = reward > -0.5
 
         if self.t_succ is None:
             if is_success_step:
                 self.t_succ = self.t
                 info["success"] = 1
-                reward += 5.0
+                # Successful steps retain reward 0.
                 if self.post_success_steps <= 0:
                     done = True
             else:
                 info["success"] = 0
         else:
-            # Post-success phase
+            # Post-success handling changes termination only, not rewards.
             info["success"] = 1
             steps_since_succ = self.t - self.t_succ
-            if is_success_step and steps_since_succ <= self.post_success_steps:
-                reward += 5.0
             if steps_since_succ >= self.post_success_steps or not is_success_step:
                 done = True
 

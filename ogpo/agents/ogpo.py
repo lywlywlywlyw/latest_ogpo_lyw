@@ -2324,8 +2324,11 @@ class OGPOAgent(flax.struct.PyTreeNode):
             ft = self.config.get('ft_flow_steps', 0)
             effective_ft = ft if (0 < ft < self.config.flow_steps) else self.config.flow_steps
             logprob_steps = effective_ft + 1 if effective_ft == self.config.flow_steps else effective_ft
+            # Constant-noise flow omits the deterministic final transition.
+            if self.config.use_constant_noise:
+                logprob_steps -= 1
         if self.config['normalize_denoising_horizon']:
-            logprob = logprob / logprob_steps
+            logprob = logprob / max(logprob_steps, 1)
 
         if self.config['normalize_act_space_dimension']:
             logprob = logprob / act_dim
@@ -2651,7 +2654,7 @@ class OGPOAgent(flax.struct.PyTreeNode):
         )
         critic_lr_schedule = create_lr_schedule(
             scheduler_type=self.config.critic_scheduler,
-            base_lr=self.config.ppo_lr,
+            base_lr=self.config.critic_lr,
             warmup_steps=self.config.critic_warmup_steps,
             decay_steps=self.config.critic_decay_steps,
             end_value=self.config.critic_end_value

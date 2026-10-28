@@ -19,7 +19,7 @@ bc_pi_steps=500000
 calql_steps=0
 q_warmup_steps=0
 bc_refine_steps=0
-online_steps=4000000
+online_steps=2000000
 gpu_mode=single
 
 # Agent config

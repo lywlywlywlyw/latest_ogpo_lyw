@@ -21,7 +21,7 @@ bc_pi_steps=1000000
 calql_steps=0
 q_warmup_steps=0
 bc_refine_steps=0
-online_steps=3000000
+online_steps=6000000
 force_jax_sync=true
 gpu_mode=single
 
@@ -66,7 +66,7 @@ eval_interval_bc=20000
 save_interval=500000
 
 # BC settings
-clip_bc=true
+clip_bc=false
 clip_bc_threshold=0.45
 clip_bc_wrt=SDE                 # low_dim OGPO legacy: gate BC early-stop on SDE eval
 use_constant_scheduler_for_bc=false
@@ -115,13 +115,13 @@ use_bc_regularization=true
 # Legacy denoiser-trained correction during ODE sampling (FPO path); off by default.
 error_correct_ode_to_sde=false
 use_denoiser=false
-# Noise schedule: tapered (sigma_t = sigma * sqrt(1-t)) is the default.
-# Mutually exclusive with use_constant_noise.
+# Tapered noise: sigma_t = 0.01 * sqrt(1-t).
+# Constant and tapered noise are mutually exclusive.
 use_constant_noise=false
 use_tapered_noise=true
 # Score correction during SDE sampling (Theorem 17): preserves marginal of BC ODE.
 error_correct_sde_to_ode=true
-constant_noise_std=0.05
+constant_noise_std=0.01
 min_noise_std=0.01
 max_noise_std=0.01
 

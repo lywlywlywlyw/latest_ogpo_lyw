@@ -19,7 +19,7 @@ bc_pi_steps=1000000
 calql_steps=0
 q_warmup_steps=0
 bc_refine_steps=0
-online_steps=6000000
+online_steps=3000000
 gpu_mode=single
 
 # Agent config
@@ -43,7 +43,7 @@ clip_grad_norm=1.0
 utd_warmup=1
 utd_online=20
 offline_ratio=0.0
-start_training=10000
+start_training=40000
 
 # Evaluation
 n_eval_envs=32

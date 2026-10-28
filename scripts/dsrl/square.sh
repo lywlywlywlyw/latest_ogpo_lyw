@@ -50,7 +50,7 @@ start_training=10000                # Paper: initial steps = 32000
 n_eval_envs=32
 eval_episodes=2
 log_interval=5000
-eval_interval=20000
+eval_interval=10000
 eval_interval_bc=5000
 save_interval=500000
 

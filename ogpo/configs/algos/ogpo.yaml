@@ -32,7 +32,7 @@ training:
 
 buffer:
   size: 2000000
-  start_training: 10000
+  start_training: 20000
   utd_warmup: 1
   utd_online: 1
   offline_ratio: 0.0
@@ -53,7 +53,7 @@ intervals:
 
 bc:
   clip_bc: true
-  clip_bc_threshold: 0.45
+  clip_bc_threshold: 0.50
   clip_bc_wrt: "ODE"   # "ODE" | "SDE" — OGPO low_dim scripts override to "SDE"
 
 success_buffer:

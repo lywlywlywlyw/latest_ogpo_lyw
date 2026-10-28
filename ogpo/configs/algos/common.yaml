@@ -70,6 +70,9 @@ dataset:
   p_aug: null
 
 checkpoint:
+  resume_path: null           # Explicit online experiment directory; never auto-resume.
+  flow_path: null              # Shared offline flow; loading skips BC training.
+  export_flow_path: null       # Standalone offline entrypoint output.
   restore_actor_path: null
   restore_critic_path: null
   restore_encoder_path: null   # path to frozen encoder pkl (from extract_encoder.py)

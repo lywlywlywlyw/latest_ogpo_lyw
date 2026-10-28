@@ -8,6 +8,7 @@ import pickle
 import random
 import shutil
 import time
+import tempfile
 from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -19,7 +20,7 @@ from gymnasium.vector import AsyncVectorEnv, AutoresetMode
 
 from ogpo.agents.modules.flax_utils import save_agent
 from ogpo.utils.datasets import Dataset, ReplayBuffer
-from ogpo.utils.log_utils import CsvLogger, get_exp_name, get_flag_dict, setup_wandb
+from ogpo.utils.log_utils import CsvLogger, get_exp_name, get_flag_dict, setup_wandb, make_run_timestamp, timestamped_run_name
 
 
 class LoggingHelper:
@@ -102,113 +103,98 @@ def make_vectorized_env(
     return vec_env
 
 
-def get_checkpoint_dir(seed: int, env_name: str, algo_name: str = 'ogpo') -> str:
-    """Get checkpoint directory path.
-
-    Defaults to `./checkpoints/<algo>/<seed>_<env>`. Override the root with the
-    `OGPO_CHECKPOINT_ROOT` environment variable (e.g. point it at fast scratch
-    storage on a cluster).
-    """
+def get_checkpoint_dir(seed: int, env_name: str, algo_name: str = 'ogpo',
+                       run_timestamp: Optional[str] = None) -> str:
+    """Allocate a timestamped directory for one online experiment."""
     root = os.environ.get('OGPO_CHECKPOINT_ROOT', os.path.join(os.getcwd(), 'checkpoints'))
-    checkpoint_path = os.path.join(root, algo_name, f'{seed}_{env_name}')
-    return checkpoint_path
+    return os.path.join(root, algo_name, f'{seed}_{env_name}',
+                        run_timestamp or make_run_timestamp())
+
 
 def save_rolling_checkpoint(
-        agent: Any,
-        replay_buffer: Any,
-        step: int,
-        online_loop_step: int,
-        seed: int,
-        env_name: str,
-        wandb_run_id: Optional[str] = None,
-        algo_name: str = 'ogpo',
+        agent: Any, replay_buffer: Any, step: int, online_loop_step: int,
+        seed: int, env_name: str, wandb_run_id: Optional[str] = None,
+        algo_name: str = 'ogpo', checkpoint_dir: Optional[str] = None,
     ):
-    """ Save rolling checkpoint (keeps only latest)"""
-    checkpoint_dir = get_checkpoint_dir(seed, env_name, algo_name)
+    """Commit a complete step directory atomically; retain the latest two."""
+    if checkpoint_dir is None:
+        raise ValueError('Online checkpoint saving requires an explicit experiment directory')
     os.makedirs(checkpoint_dir, exist_ok=True)
+    final_dir = os.path.join(checkpoint_dir, str(step))
+    if os.path.isdir(final_dir):
+        if all(os.path.isfile(os.path.join(final_dir, name))
+               for name in ('agent.pkl', 'buffer.pkl', 'meta.json')):
+            return  # A final save may coincide with a periodic save.
+        raise FileExistsError(f'Incomplete checkpoint already occupies {final_dir}')
+    staging_dir = tempfile.mkdtemp(prefix=f'.{step}_', suffix='.tmp', dir=checkpoint_dir)
+    try:
+        with open(os.path.join(staging_dir, 'agent.pkl'), 'wb') as stream:
+            pickle.dump(flax.serialization.to_state_dict(agent), stream)
+        with open(os.path.join(staging_dir, 'buffer.pkl'), 'wb') as stream:
+            pickle.dump(replay_buffer, stream)
+        metadata = dict(step=step, online_loop_step=online_loop_step,
+                        seed=seed, env_name=env_name, algo_name=algo_name,
+                        wandb_run_id=wandb_run_id)
+        with open(os.path.join(staging_dir, 'meta.json'), 'w') as stream:
+            json.dump(metadata, stream)
+        os.replace(staging_dir, final_dir)
+    finally:
+        if os.path.isdir(staging_dir):
+            shutil.rmtree(staging_dir)
+    print(f'Saved complete online checkpoint: {final_dir}')
+    complete_steps = sorted(int(name) for name in os.listdir(checkpoint_dir)
+                            if name.isdigit() and all(os.path.isfile(
+                                os.path.join(checkpoint_dir, name, filename))
+                                for filename in ('agent.pkl', 'buffer.pkl', 'meta.json')))
+    for old_step in complete_steps[:-2]:
+        shutil.rmtree(os.path.join(checkpoint_dir, str(old_step)))
 
-    agent_path = os.path.join(checkpoint_dir, f'{step}_agent.pkl')
-    buffer_path = os.path.join(checkpoint_dir, f'{step}_buffer.pkl')
-    meta_path = os.path.join(checkpoint_dir, f'{step}_meta.json')
 
-    with open(agent_path, 'wb') as f:
-        pickle.dump(flax.serialization.to_state_dict(agent), f)
+def load_rolling_checkpoint(seed: int, env_name: str, agent_structure: Any,
+                            algo_name: str = 'ogpo', *, resume_path: str):
+    """Restore the latest complete checkpoint only inside the requested directory.
 
-    with open(buffer_path, 'wb') as f:
-        pickle.dump(replay_buffer, f)
-
-    meta_data = {'online_loop_step': online_loop_step}
-    if wandb_run_id is not None:
-        meta_data['wandb_run_id'] = wandb_run_id
-    with open(meta_path, 'w') as f:
-        json.dump(meta_data, f)
-
-    print(f"Saved rolling checkpoint to {checkpoint_dir} at step {step}")
-
-    # Remove all but the just-written checkpoint.
-    for filename in os.listdir(checkpoint_dir):
-        if str(step) in filename:
-            continue
-        file_path = os.path.join(checkpoint_dir, filename)
+    Both new step directories and explicitly requested legacy flat directories
+    are supported. Missing or incompatible checkpoints never start a fresh run.
+    """
+    checkpoint_dir = os.path.abspath(os.path.expanduser(resume_path))
+    if not os.path.isdir(checkpoint_dir):
+        raise FileNotFoundError(f'Resume directory does not exist: {checkpoint_dir}')
+    candidates = []
+    for name in os.listdir(checkpoint_dir):
+        if name.isdigit():
+            directory = os.path.join(checkpoint_dir, name)
+            paths = tuple(os.path.join(directory, filename)
+                          for filename in ('agent.pkl', 'buffer.pkl', 'meta.json'))
+            if all(os.path.isfile(path) for path in paths):
+                candidates.append((int(name), paths))
+        elif name.endswith('_agent.pkl') and name.split('_')[0].isdigit():
+            step = int(name.split('_')[0])
+            paths = tuple(os.path.join(checkpoint_dir, f'{step}_{suffix}')
+                          for suffix in ('agent.pkl', 'buffer.pkl', 'meta.json'))
+            if all(os.path.isfile(path) for path in paths):
+                candidates.append((step, paths))
+    for step, (agent_path, buffer_path, meta_path) in sorted(candidates, reverse=True):
         try:
-            if os.path.isfile(file_path) or os.path.islink(file_path):
-                os.unlink(file_path)
-            elif os.path.isdir(file_path):
-                shutil.rmtree(file_path)
-        except Exception as e:
-            print(f'Failed to delete {file_path}. Reason: {e}')
-
-
-def load_rolling_checkpoint(seed: int, env_name: str, agent_structure: Any, algo_name: str = 'ogpo',) -> Tuple[Any, Any, int, int, Optional[str]]:
-    """ Load rolling checkpoint """
-    checkpoint_dir = get_checkpoint_dir(seed, env_name, algo_name)
-    if not os.path.exists(checkpoint_dir):
-        return None, None, None, None, None
-
-    files = glob.glob(os.path.join(checkpoint_dir, "*_agent.pkl"))
-    if not files:
-        return None, None, None, None, None
-
-    steps = []
-    for f in files:
-        try:
-            basename = os.path.basename(f)
-            step = int(basename.split('_')[0])
-            steps.append(step)
-        except:
+            with open(meta_path) as stream:
+                metadata = json.load(stream)
+            with open(agent_path, 'rb') as stream:
+                agent_state = pickle.load(stream)
+            with open(buffer_path, 'rb') as stream:
+                replay_buffer = pickle.load(stream)
+        except (OSError, EOFError, pickle.UnpicklingError, ValueError) as error:
+            print(f'Skipping unreadable checkpoint {step}: {error}')
             continue
-
-    if not steps:
-        return None, None, None, None, None
-
-    latest_step = max(steps)
-
-    agent_path = os.path.join(checkpoint_dir, f'{latest_step}_agent.pkl')
-    buffer_path = os.path.join(checkpoint_dir, f'{latest_step}_buffer.pkl')
-    meta_path = os.path.join(checkpoint_dir, f'{latest_step}_meta.json')
-
-    if not os.path.exists(buffer_path):
-        print(f"Buffer checkpoint missing for step {latest_step}")
-        return None, None, None, None, None
-
-    print(f"Loading rolling checkpoint from step {latest_step}")
-
-    with open(agent_path, 'rb') as f:
-        agent_state = pickle.load(f)
-    agent = flax.serialization.from_state_dict(agent_structure, agent_state)
-
-    with open(buffer_path, 'rb') as f:
-        replay_buffer = pickle.load(f)
-
-    online_loop_step = 0
-    wandb_run_id = None
-    if os.path.exists(meta_path):
-        with open(meta_path, 'r') as f:
-            meta = json.load(f)
-            online_loop_step = meta.get('online_loop_step', 0)
-            wandb_run_id = meta.get('wandb_run_id', None)
-
-    return agent, replay_buffer, latest_step, online_loop_step, wandb_run_id
+        for key, expected in (('seed', seed), ('env_name', env_name), ('algo_name', algo_name)):
+            if key in metadata and metadata[key] != expected:
+                raise ValueError(f'Resume {key}: {metadata[key]} != {expected}')
+        online_step = metadata.get('online_loop_step', 0)
+        if online_step <= 0:
+            raise ValueError(f'Checkpoint {step} has no valid online step count')
+        agent = flax.serialization.from_state_dict(agent_structure, agent_state)
+        print(f'Resumed online checkpoint: {agent_path} (online step {online_step})')
+        return agent, replay_buffer, step, online_step, metadata.get('wandb_run_id')
+    raise FileNotFoundError(f'No complete readable online checkpoint in {checkpoint_dir}')
 
 
 def process_train_dataset(
@@ -334,7 +320,8 @@ def setup_experiment_logging(
     env_name: str,
     log_enabled: bool = True,
     prefixes: Optional[List[str]] = None,
-    checkpoint_dir_fn: Optional[Callable] = None,
+    run_timestamp: Optional[str] = None,
+    resume_wandb_id: Optional[str] = None,
     config: Optional[dict] = None,
 ) -> Tuple[str, LoggingHelper, Optional[str]]:
     """ Setup experiment logging infrastructure """
@@ -343,10 +330,11 @@ def setup_experiment_logging(
     if prefixes is None:
         prefixes = ["eval", "offline_agent", "online_agent", "env"]
 
+    run_timestamp = run_timestamp or make_run_timestamp()
     if wandb_name == "test":
-        exp_name = get_exp_name(seed)
+        exp_name = get_exp_name(seed, run_timestamp)
     else:
-        exp_name = wandb_name + "seed" + str(seed)
+        exp_name = timestamped_run_name(wandb_name + "seed" + str(seed), run_timestamp)
 
     # Relocate experiment data (flags.json, CSV logs) with the `OGPO_EXP_ROOT`
     # environment variable (e.g. point it at fast scratch storage on a cluster).
@@ -359,43 +347,15 @@ def setup_experiment_logging(
     wandb_run_id = None
 
     if log_enabled:
-        # Reuse the wandb run ID from an existing checkpoint, if any.
-        checkpoint_wandb_id = None
-        if checkpoint_dir_fn is not None:
-            try:
-                checkpoint_dir = checkpoint_dir_fn(seed, env_name)
-                if os.path.exists(checkpoint_dir):
-                    files = glob.glob(os.path.join(checkpoint_dir, "*_meta.json"))
-                    if files:
-                        latest_meta = max(files, key=lambda f: int(os.path.basename(f).split('_')[0]))
-                        with open(latest_meta, 'r') as f:
-                            meta = json.load(f)
-                            checkpoint_wandb_id = meta.get('wandb_run_id', None)
-            except Exception as e:
-                print(f"Could not check for existing wandb run ID: {e}")
+        run = setup_wandb(
+            project=project, group=run_group, name=exp_name,
+            mode=os.environ.get("WANDB_MODE", "online"), config=config,
+            id=resume_wandb_id,
+            resume="allow" if resume_wandb_id else None,
+        )
+        wandb_run_id = run.id
 
-        if checkpoint_wandb_id is not None:
-            setup_wandb(
-                project=project,
-                group=run_group,
-                name=exp_name,
-                mode=os.environ.get("WANDB_MODE", "online"),
-                id=checkpoint_wandb_id,
-                resume="allow",
-                config=config,
-            )
-            wandb_run_id = checkpoint_wandb_id
-        else:
-            setup_wandb(
-                project=project,
-                group=run_group,
-                name=exp_name,
-                mode=os.environ.get("WANDB_MODE", "online"),
-                config=config,
-            )
-            wandb_run_id = wandb.run.id
-
-        save_dir = os.path.join(save_dir, wandb.run.project, run_group, env_name, exp_name)
+        save_dir = os.path.join(save_dir, run.project, run_group, env_name, exp_name)
         os.makedirs(save_dir, exist_ok=True)
 
         flag_dict = get_flag_dict(config)
@@ -413,6 +373,8 @@ def setup_experiment_logging(
             log_enabled=True,
         )
     else:
+        save_dir = os.path.join(save_dir, project, run_group, env_name, exp_name)
+        os.makedirs(save_dir, exist_ok=True)
         logger = LoggingHelper(
             csv_loggers={prefix: None for prefix in prefixes},
             wandb_logger=None,

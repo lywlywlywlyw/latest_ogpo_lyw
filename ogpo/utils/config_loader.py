@@ -65,7 +65,7 @@ def _to_attr_dict(d: Dict) -> AttrDict:
     """Recursively convert a dict to AttrDict, normalizing value types."""
     # Keys whose list values should be tuples (hidden dimensions).
     TUPLE_KEYS = {
-        'actor_hidden_dims', 'value_hidden_dims', 'hidden_dims',
+        'actor_hidden_dims', 'value_hidden_dims', 'hidden_dims', 'bc_flow_hidden_dims',
         'noise_net_hidden_dims', 'edit_hidden_dims',
         'action_critic_hidden_dims', 'edit_actor_hidden_dims',
         'simba_actor_hidden_dims', 'simba_critic_hidden_dims',
@@ -250,6 +250,12 @@ def parse_cli_args(argv: Optional[List[str]] = None) -> tuple:
                 overrides[key] = True
         i += 1
 
+    for alias, canonical in (('flow_checkpoint_path', 'checkpoint.flow_path'),
+                             ('resume_path', 'checkpoint.resume_path')):
+        if alias in overrides:
+            if canonical in overrides and overrides[canonical] != overrides[alias]:
+                raise ValueError(f'Conflicting {alias} and {canonical}')
+            overrides[canonical] = overrides.pop(alias)
     return args.algo, overrides
 
 

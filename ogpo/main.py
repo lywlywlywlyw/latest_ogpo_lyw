@@ -1,11 +1,11 @@
 import glob
 import os
 import random
-from functools import partial
 
 import jax
 import numpy as np
 
+from ogpo.utils.log_utils import make_run_timestamp, is_run_timestamp
 from ogpo.utils.sharding import create_mesh, shard_agent
 
 if "CUDA_VISIBLE_DEVICES" in os.environ:
@@ -28,12 +28,13 @@ from ogpo.utils.main_helper import (
     setup_experiment_logging,
 )
 from ogpo.runners.bc_runner import (
-    run_bc_training,
     run_bc_q_training,
     run_calql_training,
     _build_eval_flags,
     _run_evaluation,
 )
+from ogpo.runners.offline_runner import run_offline_pretraining
+from ogpo.utils.flow_checkpoint import load_flow_checkpoint, save_flow_checkpoint
 from ogpo.runners.online_rl_runner import run_online_rl
 from ogpo.runners.dsrl_runner import run_dsrl_online_rl, DSRL_ALGORITHMS
 from ogpo.agents.ogpo import OGPOAgent
@@ -136,7 +137,7 @@ AGENTS = {
 }
 
 
-def main():
+def main(*, offline_only=False):
     algo_name, cli_overrides = parse_cli_args()
     config = load_config(algo_name, cli_overrides)
 
@@ -145,6 +146,32 @@ def main():
     else:
         algo_name = config["agent"]["agent_name"]
     print(f"Running algorithm: {algo_name}")
+    flow_path = config['checkpoint'].get('flow_path')
+    resume_path = config['checkpoint'].get('resume_path')
+    if flow_path and resume_path:
+        raise ValueError('flow_checkpoint_path and resume_path are mutually exclusive')
+    if resume_path and (config['checkpoint'].get('restore_actor_path') or
+                        config['checkpoint'].get('restore_critic_path')):
+        raise ValueError('resume_path cannot be combined with individual weight restores')
+    if flow_path and config['checkpoint'].get('restore_actor_path'):
+        raise ValueError('Use either flow_checkpoint_path or restore_actor_path')
+    if offline_only and resume_path:
+        raise ValueError('Offline pretraining does not accept an online resume_path')
+    if resume_path and not os.path.isdir(os.path.expanduser(resume_path)):
+        raise FileNotFoundError(f'Resume directory does not exist: {resume_path}')
+
+    if offline_only:
+        if algo_name != "ogpo":
+            raise ValueError("Standalone offline pretraining requires --algo=ogpo")
+        if config['training']['bc_pi_steps'] <= 0:
+            raise ValueError("Offline pretraining requires training.bc_pi_steps > 0")
+        config['training'].update(bc_only=True, online_steps=0, bc_q_steps=0, calql_steps=0)
+        if config['checkpoint'].get('flow_path'):
+            raise ValueError("Offline pretraining expects no checkpoint.flow_path")
+        if not config['checkpoint'].get('export_flow_path'):
+            config['checkpoint']['export_flow_path'] = os.path.join(
+                'checkpoints', 'offline', config['env']['name'],
+                f"seed_{config['experiment']['seed']}.pkl")
 
     exp_config = config["experiment"]
     env_config = config["env"]
@@ -330,41 +357,46 @@ def main():
     if train_config.get("q_warmup_steps", 0) > 0 and not bc_only:
         prefixes.append("q_warmup")
 
-    run_name = exp_config["run_name"]
-    save_dir, logger, wandb_run_id = setup_experiment_logging(
-        seed=seed,
-        project=exp_config["project"],
-        run_group=exp_config["run_group"],
-        wandb_name=exp_config["wandb_name"],
-        save_dir=exp_config["save_dir"],
-        env_name=env_name,
-        log_enabled=exp_config["log"],
-        prefixes=prefixes,
-        checkpoint_dir_fn=partial(get_checkpoint_dir, algo_name=algo_name),
-        config=config,
-    )
-
     is_resumed = False
     resumed_step = 0
     resumed_online_step = 0
     resumed_buffer = None
-    try:
-        (
-            resumed_agent,
-            resumed_buffer,
-            resumed_step,
-            resumed_online_step,
-            resumed_wandb_id,
-        ) = load_rolling_checkpoint(seed, env_name, agent, algo_name)
-        if resumed_agent is not None:
-            agent = resumed_agent
-            if mesh is not None:
-                agent = shard_agent(agent, mesh)
-            is_resumed = True
-            print(f"Resumed from step {resumed_step}")
-    except Exception as e:
-        print(f"Could not load checkpoint: {e}")
-        resumed_buffer = None
+    resumed_wandb_id = None
+    run_timestamp = make_run_timestamp()
+    checkpoint_dir = get_checkpoint_dir(seed, env_name, algo_name, run_timestamp)
+    if resume_path:
+        (agent, resumed_buffer, resumed_step, resumed_online_step,
+         resumed_wandb_id) = load_rolling_checkpoint(
+            seed, env_name, agent, algo_name, resume_path=resume_path)
+        if resumed_online_step >= online_steps:
+            raise ValueError(f'Resume step {resumed_online_step} must be below online_steps={online_steps}')
+        if bc_only:
+            raise ValueError('Online resume_path cannot be used with training.bc_only=true')
+        if mesh is not None:
+            agent = shard_agent(agent, mesh)
+        is_resumed = True
+        # Continue within the original timestamped experiment. Legacy directories
+        # remain readable, but subsequent saves go to a new timestamped directory.
+        resumed_dir = os.path.abspath(os.path.expanduser(resume_path))
+        previous_timestamp = os.path.basename(resumed_dir)
+        if is_run_timestamp(previous_timestamp):
+            run_timestamp = previous_timestamp
+            checkpoint_dir = resumed_dir
+        print(f'Startup: resume explicit online experiment at step {resumed_online_step}')
+    elif flow_path:
+        print(f'Startup: shared offline flow {flow_path}; new online experiment starts at step 0')
+    else:
+        print('Startup: fresh offline BC followed by a new online experiment')
+    print(f'Online checkpoint directory (when enabled): {checkpoint_dir}')
+    print(f'Resume with: --resume_path={checkpoint_dir}')
+
+    run_name = exp_config["run_name"]
+    save_dir, logger, wandb_run_id = setup_experiment_logging(
+        seed=seed, project=exp_config["project"], run_group=exp_config["run_group"],
+        wandb_name=exp_config["wandb_name"], save_dir=exp_config["save_dir"],
+        env_name=env_name, log_enabled=exp_config["log"], prefixes=prefixes,
+        run_timestamp=run_timestamp, resume_wandb_id=resumed_wandb_id, config=config,
+    )
 
     # Restore pre-trained weights
     if not is_resumed:
@@ -381,41 +413,31 @@ def main():
     log_step = ep_resume if not is_resumed else resumed_step
     bc_pi_steps = train_config["bc_pi_steps"]
 
+    flow_path = checkpoint_config.get('flow_path')
+    if not is_resumed and flow_path:
+        agent = load_flow_checkpoint(agent, flow_path, env_name=env_name)
+        if mesh is not None:
+            agent = shard_agent(agent, mesh)
+        bc_pi_steps = 0
+        print(f"Loaded shared offline flow from {flow_path}; skipping BC training")
+
     if not is_resumed and bc_pi_steps > 0:
         print("\n" + "=" * 60 + "\nBC Training Phase\n" + "=" * 60)
-        agent, log_step, eval_info = run_bc_training(
-            agent=agent,
-            train_dataset=train_dataset,
-            eval_env=eval_env,
-            eval_envs=eval_envs,
-            config=agent_config,
-            logger=logger,
-            save_dir=save_dir,
-            bc_pi_steps=bc_pi_steps,
-            horizon_length=horizon_length,
-            discount=discount,
-            batch_size=agent_config["batch_size"],
-            n_eval_envs=n_eval_envs,
-            eval_episodes=eval_config["eval_episodes"],
-            eval_interval_bc=interval_config["eval_interval_bc"],
-            video_episodes=eval_config["video_episodes"],
-            video_frame_skip=eval_config["video_frame_skip"],
-            plot_q_vs_mc=eval_config["plot_q_vs_mc"],
-            run_name=run_name,
-            log_interval=interval_config["log_interval"],
-            save_interval_bc=interval_config["save_interval_bc"],
-            step_data_log_interval=interval_config["step_data_log_interval"],
-            clip_bc=bc_config["clip_bc"],
-            clip_bc_threshold=bc_config["clip_bc_threshold"],
-            clip_bc_wrt=bc_config.get("clip_bc_wrt", "ODE"),
-            env_name=env_name,
-            start_step=log_step,
-            encode_fn=encode_fn,
-            mesh=mesh,
+        agent, log_step, eval_info = run_offline_pretraining(
+            agent=agent, train_dataset=train_dataset, eval_env=eval_env,
+            eval_envs=eval_envs, config=config, agent_config=agent_config,
+            logger=logger, save_dir=save_dir, log_step=log_step,
+            encode_fn=encode_fn, mesh=mesh,
         )
         print(
             f"BC Training Complete. Final success rate: {eval_info.get('success', 'N/A')}"
         )
+
+    if checkpoint_config.get('export_flow_path'):
+        if is_resumed:
+            raise ValueError("Cannot export offline flow from a resumed online run")
+        save_flow_checkpoint(agent, checkpoint_config['export_flow_path'],
+                             env_name=env_name, seed=seed, step=log_step)
 
     bc_q_steps = train_config["bc_q_steps"]
     if not is_resumed and bc_q_steps > 0 and algo_name in ["ogpo", "reinflow_calql"]:
@@ -609,6 +631,7 @@ def main():
         step_data_log_interval=interval_config["step_data_log_interval"],
         save_interval=interval_config["save_interval"],
         preemption_backup_interval=interval_config["preemption_backup_interval"],
+        checkpoint_dir=checkpoint_dir,
         log_enabled=exp_config["log"],
         sparse=env_config["sparse"],
         p_aug=dataset_config["p_aug"],

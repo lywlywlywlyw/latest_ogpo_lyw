@@ -19,7 +19,7 @@ bc_pi_steps=500000
 calql_steps=0
 q_warmup_steps=0
 bc_refine_steps=0
-online_steps=2000000
+online_steps=3000000
 gpu_mode=single
 
 # Agent config
@@ -34,6 +34,7 @@ ft_flow_steps=10
 time_embedding=sinusoidal       # scalar | sinusoidal
 time_embedding_dim=32
 noise_chunk_length=-1
+bc_flow_hidden_dims="[512,512,512,512,512]"
 
 # Stability hyperparameters
 action_magnitude=1.5
@@ -43,7 +44,7 @@ clip_grad_norm=1.0
 utd_warmup=1
 utd_online=4
 offline_ratio=0.0
-start_training=40000
+start_training=25000
 
 # Evaluation
 n_eval_envs=32
@@ -83,6 +84,9 @@ value_hidden_dims="[512,512,512,512,512]"
 # Paths
 SAVE_DIR="exp/ogpo"
 restore_actor_path="null"
+flow_checkpoint_path="null"
+resume_path="null"
+preemption_backup_interval=-1
 restore_critic_path="null"
 ep_resume=0
 
@@ -148,6 +152,9 @@ uv run python ogpo/main.py \
     --bc.clip_bc=$clip_bc \
     --success_buffer.use_success_buffer=$use_success_buffer \
     --checkpoint.restore_actor_path=$restore_actor_path \
+    --checkpoint.flow_path=$flow_checkpoint_path \
+    --checkpoint.resume_path=$resume_path \
+    --intervals.preemption_backup_interval=$preemption_backup_interval \
     --checkpoint.restore_critic_path=$restore_critic_path \
     --checkpoint.ep_resume=$ep_resume \
     --agent.horizon_length=$horizon_length \
@@ -161,5 +168,6 @@ uv run python ogpo/main.py \
     --agent.time_embedding=$time_embedding \
     --agent.time_embedding_dim=$time_embedding_dim \
     --agent.noise_chunk_length=$noise_chunk_length \
+    --agent.bc_flow_hidden_dims=$bc_flow_hidden_dims \
     --agent.action_magnitude=$action_magnitude \
     --agent.clip_grad_norm=$clip_grad_norm

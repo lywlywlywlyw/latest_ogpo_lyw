@@ -353,6 +353,7 @@ def run_online_rl(
     step_data_log_interval: int = 10,
     save_interval: int = 500000,
     preemption_backup_interval: int = -1,
+    checkpoint_dir: Optional[str] = None,
     log_enabled: bool = True,
     sparse: bool = False,
     p_aug: Optional[float] = None,
@@ -736,8 +737,12 @@ def run_online_rl(
 
         if preemption_backup_interval > 0 and i % preemption_backup_interval == 0:
             print(f"Saving rolling checkpoint at step {log_step}")
-            save_rolling_checkpoint(agent, replay_buffer, log_step, i, seed, env_name, wandb_run_id=wandb_run_id, algo_name=algo_name)
+            save_rolling_checkpoint(agent, replay_buffer, log_step, i, seed, env_name, wandb_run_id=wandb_run_id, algo_name=algo_name, checkpoint_dir=checkpoint_dir)
 
+    if preemption_backup_interval > 0:
+        save_rolling_checkpoint(agent, replay_buffer, log_step, online_steps, seed, env_name,
+                                wandb_run_id=wandb_run_id, algo_name=algo_name,
+                                checkpoint_dir=checkpoint_dir)
     save_agent(agent, save_dir, log_step)
     print(f"Online RL training complete. Final step: {log_step}")
     return agent, log_step, eval_info, replay_buffer

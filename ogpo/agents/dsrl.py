@@ -56,13 +56,11 @@ class DSRLBestOfNAgent(flax.struct.PyTreeNode):
         if self.config['entropy_backup']:
             next_log_probs = jnp.clip(next_log_probs, -100, 100)
             target_q = batch['rewards'] + \
-                (self.config['discount'] ** self.config['horizon_length']) * batch['masks'] * \
+                batch.get('discounts', self.config['discount'] ** self.config['horizon_length']) * batch['masks'] * \
                 (next_q - temp * next_log_probs)
         else:
             target_q = batch['rewards'] + \
-                (self.config['discount'] ** self.config['horizon_length']) * batch['masks'] * next_q
-
-        target_q = jnp.clip(target_q, -500.0, 500.0)
+                batch.get('discounts', self.config['discount'] ** self.config['horizon_length']) * batch['masks'] * next_q
 
         q = self.critic_network.select('critic')(batch['observations'], actions=batch["actions"], params=grad_params)
         critic_loss = jnp.mean((q - target_q) ** 2)
@@ -438,7 +436,7 @@ class DSRLBestOfNAgent(flax.struct.PyTreeNode):
             time_emb_module = SinusoidalTimeEmbedding(embed_dim=config.get('time_embedding_dim', 32))
 
         actor_bc_flow_def = ActorVectorField(
-            hidden_dims=config['actor_hidden_dims'],
+            hidden_dims=config.get('bc_flow_hidden_dims') or config['actor_hidden_dims'],
             action_dim=full_action_dim,
             layer_norm=config['actor_layer_norm'],
             encoder=encoders.get('actor_bc_flow'),

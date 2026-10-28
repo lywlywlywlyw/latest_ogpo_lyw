@@ -5,6 +5,7 @@ set -e
 export MUJOCO_GL=egl
 
 # === Config ===
+entrypoint=ogpo/main.py
 seed=1
 device=0
 jax_frac=0.45
@@ -153,6 +154,10 @@ fwd_kl_bc_coeff=0.1
 # Paths
 SAVE_DIR="exp/ogpo"
 restore_actor_path="null"
+flow_checkpoint_path="null"
+resume_path="null"
+preemption_backup_interval=-1
+export_flow_path="null"
 restore_critic_path="null"
 ep_resume=0
 
@@ -191,7 +196,7 @@ export PYTHONPATH="$PROJECT_ROOT:$PYTHONPATH"
 
 echo "=== OGPO Toolhang | seed=$seed ==="
 
-uv run python ogpo/main.py \
+uv run python "$entrypoint" \
     --algo=ogpo \
     --experiment.project=$project \
     --experiment.run_group=$run_group \
@@ -230,6 +235,10 @@ uv run python ogpo/main.py \
     --success_buffer.use_success_buffer=$use_success_buffer \
     --agent.use_success_buffer_q=$use_success_buffer_q \
     --checkpoint.restore_actor_path=$restore_actor_path \
+    --checkpoint.flow_path=$flow_checkpoint_path \
+    --checkpoint.resume_path=$resume_path \
+    --intervals.preemption_backup_interval=$preemption_backup_interval \
+    --checkpoint.export_flow_path=$export_flow_path \
     --checkpoint.restore_critic_path=$restore_critic_path \
     --checkpoint.ep_resume=$ep_resume \
     --agent.horizon_length=$horizon_length \

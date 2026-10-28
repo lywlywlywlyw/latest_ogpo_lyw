@@ -44,7 +44,7 @@ clip_grad_norm=1.0
 utd_warmup=1
 utd_online=4                       # Paper: gradient steps per update = 20
 offline_ratio=0.0
-start_training=10000                # Paper: initial steps = 32000
+start_training=20000                # Match OGPO online learning start
 
 # Evaluation
 n_eval_envs=32
@@ -64,6 +64,9 @@ use_success_buffer=false
 # Paths
 SAVE_DIR="exp/ogpo"
 restore_actor_path="null"
+flow_checkpoint_path="null"
+resume_path="null"
+preemption_backup_interval=-1
 restore_critic_path="null"
 ep_resume=0
 
@@ -131,6 +134,9 @@ uv run python ogpo/main.py \
     --bc.clip_bc_threshold=$clip_bc_threshold \
     --success_buffer.use_success_buffer=$use_success_buffer \
     --checkpoint.restore_actor_path=$restore_actor_path \
+    --checkpoint.flow_path=$flow_checkpoint_path \
+    --checkpoint.resume_path=$resume_path \
+    --intervals.preemption_backup_interval=$preemption_backup_interval \
     --checkpoint.restore_critic_path=$restore_critic_path \
     --checkpoint.ep_resume=$ep_resume \
     --agent.horizon_length=$horizon_length \

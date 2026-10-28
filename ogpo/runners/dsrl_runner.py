@@ -1,7 +1,7 @@
 """Online RL training runner for DSRL and DSRL+EXPO algorithms.
 
 These algorithms require chunk-level transitions with noise stored in the replay
-buffer, flat batch sampling, and max-reward aggregation over action chunks.
+buffer, flat batch sampling, and discounted rewards over executed action chunks.
 This is fundamentally different from the per-step storage used by the unified
 online_rl_runner.py.
 """
@@ -96,6 +96,7 @@ def run_dsrl_online_rl(
     step_data_log_interval: int = 10,
     save_interval: int = 500000,
     preemption_backup_interval: int = -1,
+    checkpoint_dir: Optional[str] = None,
     log_enabled: bool = True,
     sparse: bool = False,
     p_aug: Optional[float] = None,
@@ -138,6 +139,8 @@ def run_dsrl_online_rl(
             actions=example_noise,
             true_actions=example_true_actions,
             rewards=np.array(0.0),
+            discounts=np.array(discount ** horizon_length),
+            chunk_steps=np.array(horizon_length, dtype=np.int32),
             terminals=np.array(0.0),
             masks=np.array(1.0),
             next_observations=example_batch['observations'],
@@ -190,6 +193,10 @@ def run_dsrl_online_rl(
     log_step = start_step
     total_env_step = 0
     eval_step = 0
+    next_eval_step = ((total_env_step // eval_interval + 1) * eval_interval
+                      if eval_interval > 0 else float("inf"))
+    next_backup_step = (preemption_backup_interval if preemption_backup_interval > 0
+                        else float("inf"))
     update_info = {}
     online_rng = jax.random.PRNGKey(seed + 40000)
     eval_flags = _build_eval_flags(n_eval_envs, eval_episodes, discount, run_name, env_name)
@@ -198,10 +205,17 @@ def run_dsrl_online_rl(
 
     if is_resumed and resumed_online_step > 0:
         total_env_step = resumed_online_step
+        if preemption_backup_interval > 0:
+            next_backup_step = ((total_env_step // preemption_backup_interval + 1)
+                                * preemption_backup_interval)
         print(f"Resuming DSRL online loop at env step {total_env_step}")
+        next_eval_step = ((total_env_step // eval_interval + 1) * eval_interval
+                          if eval_interval > 0 else float("inf"))
+        if "discounts" not in replay_buffer._dict:
+            raise ValueError("Legacy DSRL replay lacks actual chunk discounts; start a fresh run")
 
     with tqdm.tqdm(total=online_steps, initial=total_env_step, desc="DSRL Online RL", dynamic_ncols=True) as pbar:
-        while total_env_step <= online_steps:
+        while total_env_step < online_steps:
             online_rng, key = jax.random.split(online_rng)
 
             if len(action_queue) == 0:
@@ -238,6 +252,8 @@ def run_dsrl_online_rl(
             terminated_all = []
 
             for t in range(len(action_queue)):
+                if total_env_step >= online_steps:
+                    break
                 log_step += 1
                 a = action_queue.pop(0)
                 raw_next_ob, int_reward, terminated, truncated, info = env.step(a)
@@ -248,11 +264,15 @@ def run_dsrl_online_rl(
                 terminated_all.append(terminated)
                 total_env_step += 1
                 pbar.update(1)
+                if done:
+                    break
 
             # Encode the post-chunk obs once for both the transition and next step
             next_ob = _encode_ob(raw_next_ob)
 
-            reward = max(reward_all)
+            chunk_steps = len(reward_all)
+            reward = sum((discount ** t) * r for t, r in enumerate(reward_all))
+            chunk_discount = discount ** chunk_steps
             done = any(done_all)
             terminated = any(terminated_all)
 
@@ -268,6 +288,8 @@ def run_dsrl_online_rl(
                 actions=current_noise,
                 true_actions=current_true_actions,
                 rewards=reward,
+                discounts=chunk_discount,
+                chunk_steps=chunk_steps,
                 terminals=float(done),
                 masks=1.0 - float(terminated),
                 next_observations=next_ob,
@@ -278,7 +300,7 @@ def run_dsrl_online_rl(
 
             trajectory_buffer.append(transition)
 
-            if done:
+            if done or total_env_step >= online_steps:
                 is_success = float(info.get('success', 0.0))
                 score = is_success if is_success != 0 else 1e-9
                 for traj_transition in trajectory_buffer:
@@ -288,8 +310,9 @@ def run_dsrl_online_rl(
                     replay_buffer.add_transition(traj_transition)
 
                 trajectory_buffer = []
-                raw_ob, _ = env.reset(seed=seed + 10000 + total_env_step)
-                ob = _encode_ob(raw_ob)
+                if total_env_step < online_steps:
+                    raw_ob, _ = env.reset(seed=seed + 10000 + total_env_step)
+                    ob = _encode_ob(raw_ob)
                 action_queue = []
                 current_noise = None
                 current_true_actions = None
@@ -297,35 +320,29 @@ def run_dsrl_online_rl(
             else:
                 ob = next_ob
 
-            if total_env_step < start_training:
-                continue
-
             min_required = batch_size * utd_ratio
-            if replay_buffer.size < min_required:
-                continue
+            if total_env_step >= start_training and replay_buffer.size >= min_required:
+                batch = replay_buffer.sample(batch_size * utd_ratio)
+                batch = _reshape_for_utd(batch, utd_ratio, batch_size)
 
-            batch = replay_buffer.sample(batch_size * utd_ratio)
-            batch = _reshape_for_utd(batch, utd_ratio, batch_size)
+                batch_success = None
+                success_flag = False
+                if use_success_buffer:
+                    num_successful = replay_buffer._traj_success_mask[:replay_buffer.size].sum()
+                    min_success_required = success_buffer_batch_size * utd_ratio
+                    if num_successful >= min_success_required:
+                        try:
+                            batch_success = replay_buffer.sample(
+                                success_buffer_batch_size * utd_ratio,
+                                success_only=True)
+                            batch_success = _reshape_for_utd(
+                                batch_success, utd_ratio, success_buffer_batch_size)
+                            success_flag = True
+                        except ValueError:
+                            success_flag = False
 
-            batch_success = None
-            success_flag = False
-            if use_success_buffer:
-                num_successful = replay_buffer._traj_success_mask[:replay_buffer.size].sum()
-                min_success_required = success_buffer_batch_size * utd_ratio
-                if num_successful >= min_success_required:
-                    try:
-                        batch_success = replay_buffer.sample(
-                            success_buffer_batch_size * utd_ratio,
-                            success_only=True)
-                        batch_success = _reshape_for_utd(
-                            batch_success, utd_ratio, success_buffer_batch_size)
-                        success_flag = True
-                    except ValueError:
-                        success_flag = False
-
-            agent, update_info["online_agent"] = agent.batch_update(
-                _maybe_shard(batch), _maybe_shard(batch_success), success_flag)
-
+                agent, update_info["online_agent"] = agent.batch_update(
+                    _maybe_shard(batch), _maybe_shard(batch_success), success_flag)
             if force_jax_sync:
                 jax.block_until_ready(agent)
             if total_env_step % log_interval == 0 and update_info:
@@ -333,8 +350,9 @@ def run_dsrl_online_rl(
                     logger.log(info_dict, key, step=log_step)
                 update_info = {}
 
-            if total_env_step == online_steps or \
-                    (eval_interval > 0 and total_env_step % eval_interval == 0):
+            if total_env_step >= online_steps or total_env_step >= next_eval_step:
+                if eval_interval > 0:
+                    next_eval_step = (total_env_step // eval_interval + 1) * eval_interval
                 eval_step += 1
                 # Wrap the actor with the frozen encoder so the eval loop's raw
                 # dict obs is folded into the encoded vector the agent was init'd
@@ -359,12 +377,18 @@ def run_dsrl_online_rl(
             if log_enabled and save_interval > 0 and total_env_step % save_interval == 0:
                 save_agent(agent, save_dir, log_step)
 
-            if preemption_backup_interval > 0 and total_env_step % preemption_backup_interval == 0:
+            if total_env_step >= next_backup_step:
+                next_backup_step = ((total_env_step // preemption_backup_interval + 1)
+                                    * preemption_backup_interval)
                 print(f"Saving rolling checkpoint at env step {total_env_step}")
                 save_rolling_checkpoint(
                     agent, replay_buffer, log_step, total_env_step, seed, env_name,
-                    wandb_run_id=wandb_run_id, algo_name=algo_name)
+                    wandb_run_id=wandb_run_id, algo_name=algo_name, checkpoint_dir=checkpoint_dir)
 
+    if preemption_backup_interval > 0:
+        save_rolling_checkpoint(agent, replay_buffer, log_step, total_env_step, seed, env_name,
+                                wandb_run_id=wandb_run_id, algo_name=algo_name,
+                                checkpoint_dir=checkpoint_dir)
     save_agent(agent, save_dir, log_step)
     print(f"DSRL online RL training complete. Final log_step: {log_step}")
     return agent, log_step, eval_info, replay_buffer

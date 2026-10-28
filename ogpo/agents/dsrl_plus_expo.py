@@ -106,12 +106,12 @@ class DSRLEXPOAgent(flax.struct.PyTreeNode):
             # Entropy is computed in noise space (the policy's action space)
             next_log_probs = jnp.clip(next_dist.log_prob(next_noise), -100, 100)
             next_q_with_entropy = next_q - temp * next_log_probs
-            # horizon_length=1: transitions are stored at chunk level
+            # Saved discounts already contain gamma ** actual executed chunk length
             target_q = compute_td_target(
                 rewards=batch['rewards'],
                 masks=batch['masks'],
                 next_q=next_q_with_entropy,
-                discount=self.config['discount'],
+                discount=batch.get('discounts', self.config['discount'] ** self.config['horizon_length']),
                 horizon_length=1,
                 clip_min=-500.0,
                 clip_max=500.0,
@@ -121,7 +121,7 @@ class DSRLEXPOAgent(flax.struct.PyTreeNode):
                 rewards=batch['rewards'],
                 masks=batch['masks'],
                 next_q=next_q,
-                discount=self.config['discount'],
+                discount=batch.get('discounts', self.config['discount'] ** self.config['horizon_length']),
                 horizon_length=1,
                 clip_min=-500.0,
                 clip_max=500.0,
@@ -387,12 +387,12 @@ class DSRLEXPOAgent(flax.struct.PyTreeNode):
         best_idx = jnp.argmax(next_qs_all, axis=0)
         next_q = jnp.take_along_axis(next_qs_all, best_idx[None, :], axis=0).squeeze(0)
 
-        # horizon_length=1: transitions are stored at chunk level
+        # Saved discounts already contain gamma ** actual executed chunk length
         target_q = compute_td_target(
             rewards=batch['rewards'],
             masks=batch['masks'],
             next_q=next_q,
-            discount=self.config['discount'],
+            discount=batch.get('discounts', self.config['discount'] ** self.config['horizon_length']),
             horizon_length=1,
             clip_min=-500.0,
             clip_max=500.0,

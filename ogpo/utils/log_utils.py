@@ -1,6 +1,7 @@
 import os
+import re
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 
 import numpy as np
 import wandb
@@ -19,7 +20,12 @@ class CsvLogger:
     def log(self, row, step):
         row['step'] = step
         if self.file is None:
-            self.file = open(self.path, 'w')
+            if os.path.exists(self.path) and os.path.getsize(self.path):
+                with open(self.path) as existing:
+                    self.header = existing.readline().strip().split(',')
+                self.file = open(self.path, 'a')
+            else:
+                self.file = open(self.path, 'w')
             if self.header is None:
                 self.header = [k for k, v in row.items() if not isinstance(v, self.disallowed_types)]
                 self.file.write(','.join(self.header) + '\n')
@@ -35,7 +41,23 @@ class CsvLogger:
             self.file.close()
 
 
-def get_exp_name(seed):
+def make_run_timestamp():
+    """UTC timestamp with microseconds, shared by one launch's paths and name."""
+    return datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%fUTC')
+
+
+def is_run_timestamp(value):
+    return re.fullmatch(r'\d{8}_\d{6}_\d{6}UTC', value) is not None
+
+
+def timestamped_run_name(name, timestamp=None):
+    """Ensure every W&B creation has a timestamp without duplicating one."""
+    if re.search(r'_\d{8}_\d{6}_\d{6}UTC$', name):
+        return name
+    return f'{name}_{timestamp or make_run_timestamp()}'
+
+
+def get_exp_name(seed, run_timestamp=None):
     """Return the experiment name."""
     exp_name = ''
     exp_name += f'sd{seed:03d}_'
@@ -43,7 +65,7 @@ def get_exp_name(seed):
         exp_name += f's_{os.environ["SLURM_JOB_ID"]}.'
     if 'SLURM_PROCID' in os.environ:
         exp_name += f'{os.environ["SLURM_PROCID"]}.'
-    exp_name += f'{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+    exp_name += run_timestamp or make_run_timestamp()
 
     return exp_name
 
@@ -87,7 +109,7 @@ def setup_wandb(
         tags=tags,
         group=group,
         dir=wandb_output_dir,
-        name=name,
+        name=timestamped_run_name(name or group or project or "run"),
         settings=wandb.Settings(
             start_method='thread',
             _disable_stats=False,

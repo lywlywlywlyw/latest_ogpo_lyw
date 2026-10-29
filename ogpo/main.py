@@ -41,6 +41,7 @@ from ogpo.agents.ogpo import OGPOAgent
 from ogpo.agents.qc import ACFQLAgent
 from ogpo.agents.bptt import OGPOBPTTAgent
 from ogpo.agents.dsrl import DSRLBestOfNAgent
+from ogpo.agents.dsrlna import DSRLNAAgent
 from ogpo.agents.jgcw import JGCWAgent
 from ogpo.runners.jgcw_runner import run_jgcw_online_rl
 from ogpo.agents.expo import EXPOAgent
@@ -133,6 +134,7 @@ AGENTS = {
     "bptt": OGPOBPTTAgent,
     "ogpo_bptt": OGPOBPTTAgent,
     "jgcw": JGCWAgent,
+    "dsrlna": DSRLNAAgent,
     "dsrl": DSRLBestOfNAgent,
     "dsrl_bon": DSRLBestOfNAgent,
     "expo": EXPOAgent,

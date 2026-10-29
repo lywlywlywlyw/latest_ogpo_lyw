@@ -1,0 +1,6 @@
+# DSRL-NA: action TD critic teaches the noise critic at z ~ N(0,I).
+# Reuses DSRL replay collection; both critics update once per minibatch.
+_base_: dsrl.yaml
+
+agent:
+  agent_name: dsrlna

@@ -24,7 +24,7 @@ from ogpo.runners.online_rl_runner import (
 )
 
 
-DSRL_ALGORITHMS = {'dsrl', 'dsrl_bon', 'dsrl_plus_expo'}
+DSRL_ALGORITHMS = {'dsrl', 'dsrl_bon', 'dsrl_plus_expo', 'dsrlna'}
 
 
 def _build_eval_flags(n_eval_envs, eval_episodes, discount, run_name, env_name):

@@ -355,6 +355,8 @@ def main(*, offline_only=False):
     bc_only = train_config["bc_only"]
     if online_steps > 0 and not bc_only:
         prefixes.append("online_agent")
+        if algo_name == "jgcw":
+            prefixes.append("online_budget")
     if algo_name in ["ogpo", "reinflow_calql"]:
         prefixes.extend(["eval_sde", "step_data"])
     if agent_config.get('use_one_step_policy', False):

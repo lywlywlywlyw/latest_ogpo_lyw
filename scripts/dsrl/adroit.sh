@@ -11,7 +11,7 @@ device=0
 env_name="AdroitHandRelocate-v1"
 run_name="dsrl_adroit"
 wandb_name="dsrl_adroit"
-project="DSRL"
+project="OGPO"
 run_group="adroit"
 
 # Training phases

@@ -12,7 +12,7 @@ env_name="AdroitHandRelocate-v1"
 post_success_steps=0
 run_name="qc_adroit"
 wandb_name="qc_adroit"
-project="QC"
+project="OGPO"
 run_group="adroit"
 
 # Training phases

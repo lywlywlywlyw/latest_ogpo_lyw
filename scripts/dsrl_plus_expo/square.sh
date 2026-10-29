@@ -11,7 +11,7 @@ device=0
 env_name="square-mh-low_dim"
 run_name="dsrl_expo_square"
 wandb_name="dsrl_expo_square"
-project="DSRL_EXPO"
+project="OGPO"
 run_group="square"
 
 # Training phases

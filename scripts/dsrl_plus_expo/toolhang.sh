@@ -11,7 +11,7 @@ device=0
 env_name="tool_hang-ph-low_dim"
 run_name="dsrl_expo_toolhang"
 wandb_name="dsrl_expo_toolhang"
-project="DSRL_EXPO"
+project="OGPO"
 run_group="toolhang"
 
 # Training phases

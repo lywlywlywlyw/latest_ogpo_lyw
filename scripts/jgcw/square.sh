@@ -11,7 +11,7 @@ jax_frac=-1
 env_name="square-mh-low_dim"
 run_name="jgcw_square"
 wandb_name="jgcw_square"
-project="JGCW"
+project="OGPO"
 run_group="square"
 
 # Training phases

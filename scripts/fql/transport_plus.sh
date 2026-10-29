@@ -12,7 +12,7 @@ jax_frac=0.45
 env_name="transport-mh-low_dim"
 run_name="fql_transport"
 wandb_name="fql_plus_transport"
-project="FQL"
+project="OGPO"
 run_group="transport"
 
 # Training phases

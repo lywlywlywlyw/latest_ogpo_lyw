@@ -11,7 +11,7 @@ env_name="square-mh-low_dim"
 post_success_steps=0
 run_name="ogpo_fpo_square"
 wandb_name="ogpo_fpo_square"
-project="OGPO_FPO"
+project="OGPO"
 run_group="square"
 
 # Training phases

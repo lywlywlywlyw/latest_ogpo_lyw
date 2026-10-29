@@ -11,7 +11,7 @@ jax_frac=0.45
 env_name="tool_hang-ph-low_dim"
 run_name="fql_toolhang"
 wandb_name="fql_plus_toolhang"
-project="FQL"
+project="OGPO"
 run_group="toolhang"
 
 # Training phases

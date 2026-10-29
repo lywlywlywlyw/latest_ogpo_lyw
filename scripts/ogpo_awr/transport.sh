@@ -11,7 +11,7 @@ env_name="transport-mh-low_dim"
 post_success_steps=0
 run_name="ogpo_awr_transport"
 wandb_name="ogpo_awr_transport"
-project="OGPO_AWR"
+project="OGPO"
 run_group="transport"
 
 # Training phases

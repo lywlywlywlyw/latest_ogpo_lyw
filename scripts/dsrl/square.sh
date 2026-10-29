@@ -11,7 +11,7 @@ jax_frac=-1
 env_name="square-mh-low_dim"
 run_name="dsrl_square"
 wandb_name="dsrl_square"
-project="DSRL"
+project="OGPO"
 run_group="square"
 
 # Training phases

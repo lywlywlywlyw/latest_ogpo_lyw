@@ -12,7 +12,7 @@ jax_frac=0.90
 env_name="square-mh-image"
 run_name="ogpo_square_paligemma"
 wandb_name="ogpo_square_paligemma"
-project="OGPO_square_pixel"
+project="OGPO"
 run_group="square_paligemma"
 
 # Training phases

@@ -12,7 +12,7 @@ env_name="tool_hang-ph-low_dim"
 post_success_steps=0
 run_name="qc_toolhang"
 wandb_name="qc_toolhang"
-project="QC"
+project="OGPO"
 run_group="toolhang"
 
 # Training phases

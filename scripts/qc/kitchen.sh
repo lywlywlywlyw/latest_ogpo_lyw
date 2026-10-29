@@ -12,7 +12,7 @@ env_name="kitchen-mixed-v2"
 post_success_steps=0
 run_name="qc_kitchen"
 wandb_name="qc_kitchen"
-project="QC"
+project="OGPO"
 run_group="kitchen"
 
 # Training phases

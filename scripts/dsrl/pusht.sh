@@ -11,7 +11,7 @@ device=0
 env_name="pusht-keypoints-v0"
 run_name="dsrl_pusht"
 wandb_name="dsrl_pusht"
-project="DSRL"
+project="OGPO"
 run_group="pusht"
 
 # Training phases

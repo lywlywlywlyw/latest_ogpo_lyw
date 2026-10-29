@@ -11,7 +11,7 @@ device=0
 env_name="transport-mh-low_dim"
 run_name="dsrl_expo_transport"
 wandb_name="dsrl_expo_transport"
-project="DSRL_EXPO"
+project="OGPO"
 run_group="transport"
 
 # Training phases

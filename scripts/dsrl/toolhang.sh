@@ -11,7 +11,7 @@ jax_frac=-1
 env_name="tool_hang-ph-low_dim"
 run_name="dsrl_toolhang"
 wandb_name="dsrl_toolhang"
-project="DSRL"
+project="OGPO"
 run_group="toolhang"
 
 # Training phases

@@ -11,7 +11,7 @@ jax_frac=0.45
 env_name="square-mh-low_dim"
 run_name="fql_square"
 wandb_name="fql_square"
-project="FQL"
+project="OGPO"
 run_group="square"
 
 # Training phases

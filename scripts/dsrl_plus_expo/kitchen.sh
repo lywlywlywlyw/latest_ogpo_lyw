@@ -11,7 +11,7 @@ device=0
 env_name="kitchen-mixed-v2"
 run_name="dsrl_expo_kitchen"
 wandb_name="dsrl_expo_kitchen"
-project="DSRL_EXPO"
+project="OGPO"
 run_group="kitchen"
 
 # Training phases

@@ -11,7 +11,7 @@ jax_frac=-1
 env_name="transport-mh-low_dim"
 run_name="jgcw_transport"
 wandb_name="jgcw_transport"
-project="JGCW"
+project="OGPO"
 run_group="transport"
 
 # Training phases

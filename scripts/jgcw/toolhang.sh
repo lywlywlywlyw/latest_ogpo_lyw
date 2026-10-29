@@ -11,7 +11,7 @@ jax_frac=-1
 env_name="tool_hang-ph-low_dim"
 run_name="jgcw_toolhang"
 wandb_name="jgcw_toolhang"
-project="JGCW"
+project="OGPO"
 run_group="toolhang"
 
 # Training phases

@@ -11,7 +11,7 @@ env_name="tool_hang-ph-low_dim"
 post_success_steps=0
 run_name="ogpo_fpo_toolhang"
 wandb_name="ogpo_fpo_toolhang"
-project="OGPO_FPO"
+project="OGPO"
 run_group="toolhang"
 
 # Training phases

@@ -11,7 +11,7 @@ device=0
 env_name="kitchen-mixed-v2"
 run_name="bptt_kitchen"
 wandb_name="bptt_kitchen"
-project="BPTT"
+project="OGPO"
 run_group="kitchen"
 
 # Training phases

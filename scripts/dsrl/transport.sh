@@ -11,7 +11,7 @@ jax_frac=-1
 env_name="transport-mh-low_dim"
 run_name="dsrl_transport"
 wandb_name="dsrl_transport"
-project="DSRL"
+project="OGPO"
 run_group="transport"
 
 # Training phases

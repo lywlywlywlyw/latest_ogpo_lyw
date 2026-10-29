@@ -11,7 +11,7 @@ device=0
 env_name="transport-mh-low_dim"
 run_name="bptt_transport"
 wandb_name="bptt_transport"
-project="BPTT"
+project="OGPO"
 run_group="transport"
 
 # Training phases

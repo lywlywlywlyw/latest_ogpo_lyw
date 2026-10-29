@@ -12,7 +12,7 @@ env_name="square-mh-low_dim"
 post_success_steps=0
 run_name="qc_square"
 wandb_name="qc_square"
-project="QC"
+project="OGPO"
 run_group="square"
 
 # Training phases

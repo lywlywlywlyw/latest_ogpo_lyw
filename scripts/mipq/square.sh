@@ -11,7 +11,7 @@ jax_frac=0.45
 env_name="square-mh-low_dim"
 run_name="mipq_square"
 wandb_name="mipq_square"
-project="MIPQ"
+project="OGPO"
 run_group="square"
 
 # Training phases

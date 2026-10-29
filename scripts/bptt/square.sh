@@ -11,7 +11,7 @@ device=0
 env_name="square-mh-low_dim"
 run_name="bptt_square"
 wandb_name="bptt_square"
-project="BPTT"
+project="OGPO"
 run_group="square"
 
 # Training phases

@@ -12,7 +12,7 @@ env_name="transport-mh-low_dim"
 post_success_steps=0
 run_name="qc_transport"
 wandb_name="qc_transport"
-project="QC"
+project="OGPO"
 run_group="transport"
 
 # Training phases

@@ -12,7 +12,7 @@ env_name="pusht-keypoints-v0"
 post_success_steps=0
 run_name="qc_pusht"
 wandb_name="qc_pusht"
-project="QC"
+project="OGPO"
 run_group="pusht"
 
 # Training phases

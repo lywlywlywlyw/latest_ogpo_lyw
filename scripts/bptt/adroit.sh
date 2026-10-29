@@ -11,7 +11,7 @@ device=0
 env_name="AdroitHandRelocate-v1"
 run_name="bptt_adroit"
 wandb_name="bptt_adroit"
-project="BPTT"
+project="OGPO"
 run_group="adroit"
 
 # Training phases

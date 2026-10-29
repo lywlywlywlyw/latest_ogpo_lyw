@@ -184,9 +184,11 @@ for arg in "$@"; do
 done
 
 export CUDA_VISIBLE_DEVICES=$device
-if [ "$(echo "$jax_frac == -1" | bc)" -eq 1 ]; then
+if [[ "$jax_frac" == "-1" ]]; then
     export XLA_PYTHON_CLIENT_PREALLOCATE=false
+    unset XLA_PYTHON_CLIENT_MEM_FRACTION
 else
+    export XLA_PYTHON_CLIENT_PREALLOCATE=true
     export XLA_PYTHON_CLIENT_MEM_FRACTION=$jax_frac
 fi
 

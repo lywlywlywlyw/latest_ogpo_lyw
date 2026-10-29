@@ -3,11 +3,11 @@
 set -e
 
 export MUJOCO_GL=egl
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 # === Config ===
 seed=1
 device=0
+jax_frac=-1
 env_name="tool_hang-ph-low_dim"
 run_name="dsrlna_toolhang"
 wandb_name="dsrlna_toolhang"
@@ -111,6 +111,13 @@ for arg in "$@"; do
 done
 
 export CUDA_VISIBLE_DEVICES=$device
+if [[ "$jax_frac" == "-1" ]]; then
+    export XLA_PYTHON_CLIENT_PREALLOCATE=false
+    unset XLA_PYTHON_CLIENT_MEM_FRACTION
+else
+    export XLA_PYTHON_CLIENT_PREALLOCATE=true
+    export XLA_PYTHON_CLIENT_MEM_FRACTION=$jax_frac
+fi
 
 # === Run ===
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"

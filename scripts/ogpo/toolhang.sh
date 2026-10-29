@@ -196,9 +196,15 @@ PROJECT_ROOT="$( cd "$SCRIPT_DIR/../.." && pwd )"
 cd "$PROJECT_ROOT"
 export PYTHONPATH="$PROJECT_ROOT:$PYTHONPATH"
 
+PYTHON_BIN="$PROJECT_ROOT/.venv/bin/python"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+    echo "Project Python not found: $PYTHON_BIN. Set up .venv before training." >&2
+    exit 1
+fi
+
 echo "=== OGPO Toolhang | seed=$seed ==="
 
-uv run python "$entrypoint" \
+"$PYTHON_BIN" "$entrypoint" \
     --algo=ogpo \
     --experiment.project=$project \
     --experiment.run_group=$run_group \

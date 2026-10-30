@@ -193,9 +193,19 @@ def run_jgcw_online_rl(
                         else float("inf"))
     update_info = {}
     gradient_updates = 0
+    actor_gradient_updates = 0
     online_rng = jax.random.PRNGKey(seed + 40000)
     eval_flags = _build_eval_flags(n_eval_envs, eval_episodes, discount, run_name, env_name)
-    utd_ratio = utd_online
+    # Same split-UTD convention as online_rl_runner: joint then critic-only.
+    eff_utd_pi = utd_pi if utd_pi is not None else utd_online
+    eff_utd_q = utd_q if utd_q is not None else utd_online
+    if any(isinstance(u, bool) or not isinstance(u, int) or u < 1
+           for u in (eff_utd_pi, eff_utd_q)) or eff_utd_q < eff_utd_pi:
+        raise ValueError('UTD requires integer utd_q >= utd_pi >= 1')
+    split_utd = eff_utd_q > eff_utd_pi
+    if split_utd and not hasattr(agent, 'batch_critic_only_update'):
+        raise ValueError(f'{algo_name} does not support separate utd_q and utd_pi')
+    utd_ratio = eff_utd_q
     eval_info = {}
 
     if is_resumed and resumed_online_step > 0:
@@ -299,7 +309,8 @@ def run_jgcw_online_rl(
             else:
                 ob = next_ob
 
-            min_required = batch_size * utd_ratio
+            # Extra critic updates must not delay the existing actor warmup gate.
+            min_required = batch_size * eff_utd_pi
             if total_env_step >= start_training and replay_buffer.size >= min_required:
                 batch = replay_buffer.sample(batch_size * utd_ratio)
                 batch = _reshape_for_utd(batch, utd_ratio, batch_size)
@@ -308,27 +319,37 @@ def run_jgcw_online_rl(
                 success_flag = False
                 if use_success_buffer:
                     num_successful = replay_buffer._traj_success_mask[:replay_buffer.size].sum()
-                    min_success_required = success_buffer_batch_size * utd_ratio
+                    min_success_required = success_buffer_batch_size * eff_utd_pi
                     if num_successful >= min_success_required:
                         try:
                             batch_success = replay_buffer.sample(
-                                success_buffer_batch_size * utd_ratio,
+                                success_buffer_batch_size * eff_utd_pi,
                                 success_only=True)
                             batch_success = _reshape_for_utd(
-                                batch_success, utd_ratio, success_buffer_batch_size)
+                                batch_success, eff_utd_pi, success_buffer_batch_size)
                             success_flag = True
                         except ValueError:
                             success_flag = False
 
-                agent, update_info["online_agent"] = agent.batch_update(
-                    _maybe_shard(batch), _maybe_shard(batch_success), success_flag)
-                gradient_updates += utd_ratio
+                if split_utd:
+                    joint = jax.tree.map(lambda x: x[:eff_utd_pi], batch)
+                    agent, update_info["online_agent"] = agent.batch_update(
+                        _maybe_shard(joint), _maybe_shard(batch_success), success_flag)
+                    extra = jax.tree.map(lambda x: x[eff_utd_pi:], batch)
+                    agent, critic_info = agent.batch_critic_only_update(_maybe_shard(extra))
+                    update_info["online_agent"].update(critic_info)
+                else:
+                    agent, update_info["online_agent"] = agent.batch_update(
+                        _maybe_shard(batch), _maybe_shard(batch_success), success_flag)
+                gradient_updates += eff_utd_q
+                actor_gradient_updates += eff_utd_pi
             if force_jax_sync:
                 jax.block_until_ready(agent)
             if total_env_step % log_interval == 0 and update_info:
                 for key, info_dict in update_info.items():
                     logger.log(info_dict, key, step=log_step)
                 logger.log(dict(env_steps=total_env_step,
+                                actor_gradient_updates=actor_gradient_updates,
                                 critic_gradient_updates=gradient_updates,
                                 action_critic_gradient_updates=gradient_updates),
                            'online_budget', step=log_step)

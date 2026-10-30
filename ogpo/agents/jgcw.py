@@ -264,6 +264,22 @@ class JGCWAgent(flax.struct.PyTreeNode):
             agent, infos = jax.lax.scan(scan_fn, self, (batch, batch_success))
         return agent, jax.tree_util.tree_map(lambda x: x.mean(), infos)
 
+    @staticmethod
+    def _critic_only_update(agent, batch):
+        new_rng, rng = jax.random.split(agent.rng)
+        agent, action_info = agent._action_step(batch, rng)
+        state, critic_info = agent.critic_network.apply_loss_fn(
+            lambda p: agent.critic_total_loss(batch, p, rng))
+        agent.target_update(state, 'critic')
+        return agent.replace(critic_network=state, rng=new_rng), {
+            **critic_info, **action_info}
+
+    @jax.jit
+    def batch_critic_only_update(self, batch):
+        """Extra Qa/Qz updates for utd_q > utd_pi; actor and flow stay fixed."""
+        agent, infos = jax.lax.scan(self._critic_only_update, self, batch)
+        return agent, jax.tree.map(lambda x: x.mean(), infos)
+
     @jax.jit
     def sample_noise(self, observations, rng=None, deterministic=False):
         dist = self.actor_network.select('actor')(observations)

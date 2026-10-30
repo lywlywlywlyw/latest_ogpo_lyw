@@ -89,6 +89,10 @@ for arg in "$@"; do
   esac
 done
 
+# Preserve the actor budget; default to twice as many critic updates.
+utd_pi=${utd_pi:-$utd_online}
+utd_q=${utd_q:-$((2 * utd_pi))}
+
 export CUDA_VISIBLE_DEVICES=$device
 if [[ "$jax_frac" == "-1" ]]; then
     export XLA_PYTHON_CLIENT_PREALLOCATE=false
@@ -133,6 +137,8 @@ echo "=== DSRL-NA Transport | seed=$seed ==="
     --buffer.start_training=$start_training \
     --buffer.utd_warmup=$utd_warmup \
     --buffer.utd_online=$utd_online \
+    --buffer.utd_pi=$utd_pi \
+    --buffer.utd_q=$utd_q \
     --buffer.offline_ratio=$offline_ratio \
     --eval.n_eval_envs=$n_eval_envs \
     --eval.eval_episodes=$eval_episodes \

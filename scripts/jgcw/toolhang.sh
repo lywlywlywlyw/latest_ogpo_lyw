@@ -110,9 +110,9 @@ for arg in "$@"; do
   esac
 done
 
-# Preserve the actor budget; default to twice as many critic updates.
+# Preserve the actor budget; default to four times as many critic updates.
 utd_pi=${utd_pi:-$utd_online}
-utd_q=${utd_q:-$((2 * utd_pi))}
+utd_q=${utd_q:-$((4 * utd_pi))}
 
 export CUDA_VISIBLE_DEVICES=$device
 if [[ "$jax_frac" == "-1" ]]; then

@@ -4,3 +4,5 @@ _base_: dsrl.yaml
 
 agent:
   agent_name: dsrlna
+  use_replay_buffer_z: false  # Distill at replay (s, z) instead of fresh Gaussian z.
+  use_target_q: false  # Use target Qa as the distillation teacher.

@@ -75,13 +75,18 @@ log=true
 plot_q_vs_mc=false
 
 # === Parse CLI overrides ===
+python_overrides=()
 for arg in "$@"; do
   case $arg in
     --*=*)
       key="${arg%%=*}"
       value="${arg#*=}"
       key="${key#--}"
-      eval "$key=\"$value\""
+      if [[ "$key" == *.* ]]; then
+        python_overrides+=("$arg")
+      else
+        eval "$key=\"$value\""
+      fi
       ;;
     *)
       echo "Unknown argument: $arg"
@@ -170,4 +175,5 @@ echo "=== DSRL-NA Square | seed=$seed ==="
     --agent.time_embedding_dim=$time_embedding_dim \
     --agent.noise_chunk_length=$noise_chunk_length \
     --agent.action_magnitude=$action_magnitude \
-    --agent.clip_grad_norm=$clip_grad_norm
+    --agent.clip_grad_norm=$clip_grad_norm \
+    "${python_overrides[@]}"

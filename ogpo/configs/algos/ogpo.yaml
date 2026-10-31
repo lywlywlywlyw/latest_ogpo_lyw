@@ -95,11 +95,12 @@ agent:
   use_bc_regularization: true
   bc_coeff: 0.1
 
-  # Noise network (constant noise for SDE sampling)
+  # Paper setting: constant SDE noise with std=0.01.
   use_constant_noise: true
-  constant_noise_std: 0.005
-  min_noise_std: 0.005
-  max_noise_std: 0.005
+  use_tapered_noise: false
+  constant_noise_std: 0.01
+  min_noise_std: 0.01
+  max_noise_std: 0.01
 
   # Q-target variance reduction
   q_variance_reduction: false

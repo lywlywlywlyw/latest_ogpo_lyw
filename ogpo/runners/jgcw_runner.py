@@ -318,18 +318,19 @@ def run_jgcw_online_rl(
                 batch_success = None
                 success_flag = False
                 if use_success_buffer:
-                    num_successful = replay_buffer._traj_success_mask[:replay_buffer.size].sum()
-                    min_success_required = success_buffer_batch_size * eff_utd_pi
-                    if num_successful >= min_success_required:
-                        try:
-                            batch_success = replay_buffer.sample(
-                                success_buffer_batch_size * eff_utd_pi,
-                                success_only=True)
-                            batch_success = _reshape_for_utd(
-                                batch_success, eff_utd_pi, success_buffer_batch_size)
-                            success_flag = True
-                        except ValueError:
-                            success_flag = False
+                    success_idxs = np.flatnonzero(
+                        replay_buffer._traj_success_mask[:replay_buffer.size])
+                    if success_idxs.size:
+                        # Reuse even the first successful chunk across actor updates.
+                        # Explicit indices bypass Dataset.sample's no-replacement gate.
+                        idxs = replay_buffer.numpy_rng.choice(
+                            success_idxs, size=success_buffer_batch_size * eff_utd_pi,
+                            replace=True)
+                        batch_success = replay_buffer.sample(
+                            success_buffer_batch_size * eff_utd_pi, idxs=idxs)
+                        batch_success = _reshape_for_utd(
+                            batch_success, eff_utd_pi, success_buffer_batch_size)
+                        success_flag = True
 
                 if split_utd:
                     joint = jax.tree.map(lambda x: x[:eff_utd_pi], batch)

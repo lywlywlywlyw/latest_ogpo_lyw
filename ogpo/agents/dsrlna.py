@@ -31,8 +31,7 @@ class DSRLNAAgent(flax.struct.PyTreeNode):
     """SAC noise actor with an action TD critic and a distilled noise critic.
 
     Q(s,a) is updated before Q(s,z). Each noise critic head learns from the
-    corresponding action critic head at decoded noise. By default, the teacher
-    is online and noise is sampled from the standard Gaussian prior.
+    corresponding online action critic head at decoded standard Gaussian noise.
     """
 
     rng: Any
@@ -74,22 +73,18 @@ class DSRLNAAgent(flax.struct.PyTreeNode):
             f'action_critic/{k}': v for k, v in info.items()}
 
     def critic_loss(self, batch, grad_params, rng):
-        """Distill Qa(s, flow(s,z)) into Qz(s,z), matching ensemble heads.
+        """Distill online Qa(s, flow(s,z)) into Qz(s,z), with z ~ N(0,I).
 
-        Optionally reuse replay (s, z) pairs and/or teach with target Qa.
-        Rewards and other TD fields do not enter this loss.
+        Only replay states are reused: replay actions and TD fields do not enter
+        this loss. Match ensemble heads individually, as in DSRL-NA.
         """
         observations = batch['observations']
-        if self.config.get('use_replay_buffer_z', False):
-            z = batch['actions']
-        else:
-            z = jax.random.normal(
-                rng, (observations.shape[0], self.config['noise_dim']),
-                dtype=observations.dtype)
+        z = jax.random.normal(
+            rng, (observations.shape[0], self.config['noise_dim']),
+            dtype=observations.dtype)
         actions = self.noise_to_actions_public(observations, z)
-        teacher_name = 'target_critic' if self.config.get('use_target_q', False) else 'critic'
         target_q = jax.lax.stop_gradient(
-            self.action_critic_network.select(teacher_name)(observations, actions=actions))
+            self.action_critic_network.select('critic')(observations, actions=actions))
         q = self.critic_network.select('critic')(
             observations, actions=z, params=grad_params)
         # Keep the existing mean-over-heads MSE convention for critic losses.

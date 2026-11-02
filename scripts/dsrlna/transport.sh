@@ -74,18 +74,13 @@ log=true
 plot_q_vs_mc=false
 
 # === Parse CLI overrides ===
-python_overrides=()
 for arg in "$@"; do
   case $arg in
     --*=*)
       key="${arg%%=*}"
       value="${arg#*=}"
       key="${key#--}"
-      if [[ "$key" == *.* ]]; then
-        python_overrides+=("$arg")
-      else
-        eval "$key=\"$value\""
-      fi
+      eval "$key=\"$value\""
       ;;
     *)
       echo "Unknown argument: $arg"
@@ -94,9 +89,9 @@ for arg in "$@"; do
   esac
 done
 
-# Preserve the actor budget; default to four times as many critic updates.
+# Preserve the actor budget; default to twice as many critic updates.
 utd_pi=${utd_pi:-$utd_online}
-utd_q=${utd_q:-$((4 * utd_pi))}
+utd_q=${utd_q:-$((2 * utd_pi))}
 
 export CUDA_VISIBLE_DEVICES=$device
 if [[ "$jax_frac" == "-1" ]]; then
@@ -173,5 +168,4 @@ echo "=== DSRL-NA Transport | seed=$seed ==="
     --agent.noise_chunk_length=$noise_chunk_length \
     --agent.bc_flow_hidden_dims=$bc_flow_hidden_dims \
     --agent.action_magnitude=$action_magnitude \
-    --agent.clip_grad_norm=$clip_grad_norm \
-    "${python_overrides[@]}"
+    --agent.clip_grad_norm=$clip_grad_norm

@@ -195,6 +195,7 @@ def run_dsrl_online_rl(
     eval_step = 0
     next_eval_step = ((total_env_step // eval_interval + 1) * eval_interval
                       if eval_interval > 0 else float("inf"))
+    next_save_step = save_interval if save_interval > 0 else float("inf")
     next_backup_step = (preemption_backup_interval if preemption_backup_interval > 0
                         else float("inf"))
     update_info = {}
@@ -214,6 +215,8 @@ def run_dsrl_online_rl(
 
     if is_resumed and resumed_online_step > 0:
         total_env_step = resumed_online_step
+        if save_interval > 0:
+            next_save_step = (total_env_step // save_interval + 1) * save_interval
         if preemption_backup_interval > 0:
             next_backup_step = ((total_env_step // preemption_backup_interval + 1)
                                 * preemption_backup_interval)
@@ -392,8 +395,10 @@ def run_dsrl_online_rl(
                       f"success={float(eval_info.get('success', 0.0)):.4f}")
                 logger.log(eval_info, "eval", step=log_step)
 
-            if log_enabled and save_interval > 0 and total_env_step % save_interval == 0:
+            # Chunks can cross a save boundary without landing on its exact step.
+            if log_enabled and total_env_step >= next_save_step:
                 save_agent(agent, save_dir, log_step)
+                next_save_step = (total_env_step // save_interval + 1) * save_interval
 
             if total_env_step >= next_backup_step:
                 next_backup_step = ((total_env_step // preemption_backup_interval + 1)

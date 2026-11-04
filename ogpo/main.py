@@ -42,6 +42,8 @@ from ogpo.agents.qc import ACFQLAgent
 from ogpo.agents.bptt import OGPOBPTTAgent
 from ogpo.agents.dsrl import DSRLBestOfNAgent
 from ogpo.agents.dsrlna import DSRLNAAgent
+from ogpo.agents.dsrlinvert import DSRLInvertAgent
+from ogpo.runners.dsrlinvert_runner import run_dsrlinvert_online_rl
 from ogpo.agents.dsrllimit import DSRLLimitAgent
 from ogpo.runners.dsrllimit_runner import run_dsrllimit_online_rl
 from ogpo.agents.jgcw import JGCWAgent
@@ -137,6 +139,7 @@ AGENTS = {
     "ogpo_bptt": OGPOBPTTAgent,
     "jgcw": JGCWAgent,
     "dsrlna": DSRLNAAgent,
+    "dsrlinvert": DSRLInvertAgent,
     "dsrllimit": DSRLLimitAgent,
     "dsrl": DSRLBestOfNAgent,
     "dsrl_bon": DSRLBestOfNAgent,
@@ -660,6 +663,8 @@ def main(*, offline_only=False):
 
     if algo_name == "jgcw":
         agent, log_step, final_eval_info, replay_buffer = run_jgcw_online_rl(**runner_kwargs)
+    elif algo_name == "dsrlinvert":
+        agent, log_step, final_eval_info, replay_buffer = run_dsrlinvert_online_rl(**runner_kwargs)
     elif algo_name == "dsrllimit":
         agent, log_step, final_eval_info, replay_buffer = run_dsrllimit_online_rl(**runner_kwargs)
     elif algo_name in DSRL_ALGORITHMS:

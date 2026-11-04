@@ -1,0 +1,4 @@
+_base_: dsrlna.yaml
+
+agent:
+  agent_name: dsrlinvert

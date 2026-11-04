@@ -10,6 +10,7 @@ __all__ = [
     'bptt',
     'dsrl',
     'dsrlna',
+    'dsrlinvert',
     'dsrllimit',
     'expo',
     'dsrl_plus_expo',

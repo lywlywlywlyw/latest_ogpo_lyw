@@ -468,7 +468,7 @@ class DSRLInvertAgent(flax.struct.PyTreeNode):
             action_dim=noise_dim,
             layer_norm=config['actor_layer_norm'],
             encoder=encoders.get('actor'),
-            tanh_squash=True,
+            tanh_squash=False,
             state_dependent_std=True,
             low=-config["action_magnitude"],
             high=config["action_magnitude"],

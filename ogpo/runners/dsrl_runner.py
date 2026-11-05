@@ -112,10 +112,27 @@ def run_dsrl_online_rl(
     mc_regression: bool = False,
     mesh=None,
 ) -> Tuple[Any, int, Dict, ReplayBuffer]:
-    """Online RL runner for DSRL/DSRL+EXPO. Stores chunk-level transitions with
-    noise as 'actions' and denoised actions as 'true_actions'."""
+    """Store chunk transitions with noise actions and decoded true_actions.
+
+    For DSRLNA, after start_training environment steps and enough replay data,
+    run q_warmup_steps * utd_warmup updates of each critic without collecting
+    data or updating the actor/temperature/flow, then enter normal training.
+    q_warmup_steps=0 keeps the original behavior.
+    """
     assert algo_name in DSRL_ALGORITHMS, f"Expected DSRL algorithm, got {algo_name}"
     assert offline_ratio == 0.0, f"DSRL requires offline_ratio=0.0, got {offline_ratio}"
+
+    if algo_name == 'dsrlna':
+        if isinstance(q_warmup_steps, bool) or not isinstance(q_warmup_steps, int) or q_warmup_steps < 0:
+            raise ValueError('DSRLNA q_warmup_steps must be a nonnegative integer')
+        if isinstance(utd_warmup, bool) or not isinstance(utd_warmup, int) or utd_warmup < 1:
+            raise ValueError('DSRLNA utd_warmup must be a positive integer')
+    # Warmup runs atomically before the first actor update. Rolling checkpoints
+    # are written outside that block, so a resumed actor with updates has
+    # already passed it; checkpoints saved during collection still need it.
+    # TrainState starts at step=1 before any gradient updates.
+    q_warmup_done = (algo_name != 'dsrlna' or q_warmup_steps == 0 or
+                     (is_resumed and int(agent.actor_network.step) > 1))
 
     example_batch = train_dataset.sample(())
     action_dim = example_batch['actions'].shape[-1]
@@ -335,6 +352,29 @@ def run_dsrl_online_rl(
             # Extra critic updates must not delay the existing actor warmup gate.
             min_required = batch_size * eff_utd_pi
             if total_env_step >= start_training and replay_buffer.size >= min_required:
+                if not q_warmup_done:
+                    print(f"[DSRLNA Q-warmup] env_step={total_env_step}: "
+                          f"{q_warmup_steps} batches x utd_warmup={utd_warmup}; "
+                          "training Qa/Qz with actor, temperature and flow frozen")
+                    for warmup_i in tqdm.trange(q_warmup_steps, desc="DSRLNA Q-warmup",
+                                               dynamic_ncols=True, leave=False):
+                        warmup_batch = replay_buffer.sample(batch_size * utd_warmup)
+                        warmup_batch = _reshape_for_utd(warmup_batch, utd_warmup, batch_size)
+                        agent, warmup_info = agent.batch_critic_only_update(
+                            _maybe_shard(warmup_batch))
+                        if force_jax_sync:
+                            jax.block_until_ready(agent)
+                        # Keep W&B's global step monotonic; environment steps and
+                        # the online interaction budget do not advance here.
+                        log_step += 1
+                        if ((log_interval > 0 and (warmup_i + 1) % log_interval == 0)
+                                or warmup_i + 1 == q_warmup_steps):
+                            logger.log({**warmup_info, 'env_steps': total_env_step,
+                                        'critic_gradient_updates': (warmup_i + 1) * utd_warmup},
+                                       'q_warmup', step=log_step)
+                    q_warmup_done = True
+                    print("[DSRLNA Q-warmup] complete; starting normal actor/critic training")
+
                 batch = replay_buffer.sample(batch_size * utd_ratio)
                 batch = _reshape_for_utd(batch, utd_ratio, batch_size)
 

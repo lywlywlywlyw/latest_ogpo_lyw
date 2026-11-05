@@ -17,7 +17,9 @@ run_group="transport"
 # Training phases
 bc_pi_steps=1000000
 calql_steps=0
-q_warmup_steps=0
+# After collection, train both critics before the first actor update.
+# Total gradient updates per critic = q_warmup_steps * utd_warmup; 0 disables.
+q_warmup_steps=${q_warmup_steps:-5000}
 bc_refine_steps=0
 online_steps=6000000
 gpu_mode=single

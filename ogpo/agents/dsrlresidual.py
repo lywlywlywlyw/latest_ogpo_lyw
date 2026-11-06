@@ -131,7 +131,9 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
         q = jnp.min(qs, axis=0) if self.config['q_agg'] == 'min' else jnp.mean(qs, axis=0)
         base = self.base_policy_network.select('actor')(batch['observations'])
         delta = dist.mean() - jax.lax.stop_gradient(base.mean())
-        kl = (0.5 * jnp.sum(jnp.square(delta / dist.stddev()), axis=-1)).mean()
+        # Floor only the denominator of this KL surrogate; keep sampling scales.
+        kl_std = jnp.maximum(dist.stddev(), jnp.exp(self.config['base_log_std_min']))
+        kl = (0.5 * jnp.sum(jnp.square(delta / kl_std), axis=-1)).mean()
 
         temp = self.actor_network.select('temp')()
         multiplier = self.actor_network.select('kl_multiplier')()

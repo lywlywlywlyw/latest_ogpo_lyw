@@ -42,6 +42,10 @@ from ogpo.agents.qc import ACFQLAgent
 from ogpo.agents.bptt import OGPOBPTTAgent
 from ogpo.agents.dsrl import DSRLBestOfNAgent
 from ogpo.agents.dsrlna import DSRLNAAgent
+from ogpo.agents.dsrlresidual import DSRLResidualAgent
+from ogpo.runners.dsrlresidual_runner import (
+    run_dsrlresidual_online_rl, run_residual_base_pretraining,
+)
 from ogpo.agents.dsrlinvert import DSRLInvertAgent
 from ogpo.runners.dsrlinvert_runner import run_dsrlinvert_online_rl
 from ogpo.agents.dsrllimit import DSRLLimitAgent
@@ -139,6 +143,7 @@ AGENTS = {
     "ogpo_bptt": OGPOBPTTAgent,
     "jgcw": JGCWAgent,
     "dsrlna": DSRLNAAgent,
+    "dsrlresidual": DSRLResidualAgent,
     "dsrlinvert": DSRLInvertAgent,
     "dsrllimit": DSRLLimitAgent,
     "dsrl": DSRLBestOfNAgent,
@@ -446,6 +451,10 @@ def main(*, offline_only=False):
             f"BC Training Complete. Final success rate: {eval_info.get('success', 'N/A')}"
         )
 
+    if algo_name == 'dsrlresidual' and not is_resumed:
+        agent, log_step = run_residual_base_pretraining(
+            agent, train_dataset, agent_config, logger, start_step=log_step, mesh=mesh)
+
     if checkpoint_config.get('export_flow_path'):
         if is_resumed:
             raise ValueError("Cannot export offline flow from a resumed online run")
@@ -665,6 +674,8 @@ def main(*, offline_only=False):
         agent, log_step, final_eval_info, replay_buffer = run_jgcw_online_rl(**runner_kwargs)
     elif algo_name == "dsrlinvert":
         agent, log_step, final_eval_info, replay_buffer = run_dsrlinvert_online_rl(**runner_kwargs)
+    elif algo_name == "dsrlresidual":
+        agent, log_step, final_eval_info, replay_buffer = run_dsrlresidual_online_rl(**runner_kwargs)
     elif algo_name == "dsrllimit":
         agent, log_step, final_eval_info, replay_buffer = run_dsrllimit_online_rl(**runner_kwargs)
     elif algo_name in DSRL_ALGORITHMS:

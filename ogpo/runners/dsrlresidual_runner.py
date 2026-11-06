@@ -144,7 +144,7 @@ def run_dsrlresidual_online_rl(
     """Online RL runner for DSRLResidual. Stores chunk-level transitions with
     noise as 'actions' and denoised actions as 'true_actions'."""
     if use_success_buffer or bc_refine_steps:
-        raise ValueError('DSRLResidual uses SAC + KL only, with a frozen decoder')
+        raise ValueError('DSRLResidual uses a mean-residual actor with optional KL and a frozen decoder')
     assert algo_name in DSRL_ALGORITHMS, f"Expected DSRL algorithm, got {algo_name}"
     assert offline_ratio == 0.0, f"DSRL requires offline_ratio=0.0, got {offline_ratio}"
 
@@ -256,6 +256,10 @@ def run_dsrlresidual_online_rl(
                           if eval_interval > 0 else float("inf"))
         if "discounts" not in replay_buffer._dict:
             raise ValueError("Legacy DSRL replay lacks actual chunk discounts; start a fresh run")
+
+    next_log_step = ((total_env_step // log_interval + 1) * log_interval
+                     if log_interval > 0 else float("inf"))
+    logger.start_online_phase(log_step, online_step=total_env_step)
 
     with tqdm.tqdm(total=online_steps, initial=total_env_step, desc="DSRLResidual Online RL", dynamic_ncols=True) as pbar:
         while total_env_step < online_steps:
@@ -378,10 +382,12 @@ def run_dsrlresidual_online_rl(
                         _maybe_shard(batch), _maybe_shard(batch_success), success_flag)
             if force_jax_sync:
                 jax.block_until_ready(agent)
-            if total_env_step % log_interval == 0 and update_info:
+            if log_interval > 0 and update_info and (
+                    total_env_step >= next_log_step or total_env_step >= online_steps):
                 for key, info_dict in update_info.items():
                     logger.log(info_dict, key, step=log_step)
                 update_info = {}
+                next_log_step = (total_env_step // log_interval + 1) * log_interval
 
             if total_env_step >= online_steps or total_env_step >= next_eval_step:
                 if eval_interval > 0:

@@ -131,27 +131,29 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
         q = jnp.min(qs, axis=0) if self.config['q_agg'] == 'min' else jnp.mean(qs, axis=0)
         base = self.base_policy_network.select('actor')(batch['observations'])
         delta = dist.mean() - jax.lax.stop_gradient(base.mean())
-        # Floor only the denominator of this KL surrogate; keep sampling scales.
-        kl_std = jnp.maximum(dist.stddev(), jnp.exp(self.config['base_log_std_min']))
-        kl = (0.5 * jnp.sum(jnp.square(delta / kl_std), axis=-1)).mean()
-
-        temp = self.actor_network.select('temp')()
         multiplier = self.actor_network.select('kl_multiplier')()
-        actor_loss = jnp.mean(temp * log_probs - q)
-        constrained_loss = actor_loss + multiplier * (kl - self.config['kl_epsilon'])
-        # Dual descent increases lambda when KL exceeds epsilon. Stop gradients
-        # on both sides so actor and dual receive their respective objectives.
-        dual = self.actor_network.select('kl_multiplier')(params=grad_params)
-        dual_loss = dual * jax.lax.stop_gradient(self.config['kl_epsilon'] - kl)
-        entropy = -jax.lax.stop_gradient(log_probs).mean()
-        temp_param = self.actor_network.select('temp')(params=grad_params)
-        temp_loss = temp_param * (entropy - self.config['target_entropy'])
-        total_loss = constrained_loss + dual_loss + temp_loss
+        # The frozen-covariance Gaussian has no mean-dependent entropy term.
+        actor_loss = -jnp.mean(q)
+        use_kl_loss = self.config.get('use_kl_loss', True)
+        kl = jnp.float32(0.0)
+        dual_loss = jnp.float32(0.0)
+        constrained_loss = actor_loss
+        if use_kl_loss:
+            # Floor only the denominator of this KL surrogate; keep sampling scales.
+            kl_std = jnp.maximum(dist.stddev(), jnp.exp(self.config['base_log_std_min']))
+            kl = (0.5 * jnp.sum(jnp.square(delta / kl_std), axis=-1)).mean()
+            constrained_loss = actor_loss + multiplier * (kl - self.config['kl_epsilon'])
+            # Dual descent increases lambda when KL exceeds epsilon. Stop gradients
+            # on both sides so actor and dual receive their respective objectives.
+            dual = self.actor_network.select('kl_multiplier')(params=grad_params)
+            dual_loss = dual * jax.lax.stop_gradient(self.config['kl_epsilon'] - kl)
+        total_loss = constrained_loss + dual_loss
         return total_loss, {
-            'total_loss': total_loss, 'actor_loss': actor_loss, 'temp_loss': temp_loss,
-            'kl': kl, 'kl_multiplier': multiplier, 'dual_loss': dual_loss,
+            'total_loss': total_loss, 'actor_loss': actor_loss,
+            'kl': kl, 'kl_enabled': jnp.float32(use_kl_loss),
+            'kl_multiplier': multiplier, 'dual_loss': dual_loss,
             'log_probs_mean': log_probs.mean(), 'entropy': -log_probs.mean(),
-            'q_actor_mean': q.mean(), 'temp': temp, 'actor_mode': dist.mode().mean(),
+            'q_actor_mean': q.mean(), 'actor_mode': dist.mode().mean(),
             'base_std_mean': dist.stddev().mean(), 'delta_rms': jnp.sqrt(jnp.mean(delta ** 2)),
         }
 
@@ -367,6 +369,7 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
         if config.get('kl_epsilon', 0.1) < 0 or config.get('init_kl_multiplier', 1.0) <= 0:
             raise ValueError('Require kl_epsilon >= 0 and init_kl_multiplier > 0')
         config = dict(config)
+        config.setdefault('use_kl_loss', True)
         config.setdefault('kl_epsilon', 0.1)
         config.setdefault('init_kl_multiplier', 1.0)
         rng = jax.random.PRNGKey(seed)
@@ -432,6 +435,8 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
             hidden_dims=config['actor_hidden_dims'], action_dim=noise_dim,
             layer_norm=config['actor_layer_norm'], encoder=encoders.get('actor'),
             obs_kwargs=flax.core.FrozenDict(_two_tier_kwargs))
+        # Retain the scalar for checkpoint compatibility and optional entropy backup;
+        # the online mean-actor objective does not optimize temperature.
         temp_def = LogParam(init_value=config['init_temperature'])
 
         time_emb_type = config.get('time_embedding', 'scalar')

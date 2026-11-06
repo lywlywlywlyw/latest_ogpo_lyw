@@ -35,17 +35,38 @@ class LoggingHelper:
         self.csv_loggers = csv_loggers
         self.wandb_logger = wandb_logger
         self.log_enabled = log_enabled
+        self.online_step_offset = None
         self.first_time = time.time()
         self.last_time = time.time()
+
+    def start_online_phase(self, step: int, online_step: int = 0):
+        """Plot online metrics against environment steps, retaining W&B event order."""
+        self.online_step_offset = step - online_step
+        if not self.log_enabled or self.wandb_logger is None:
+            return
+        self.wandb_logger.define_metric('online/step')
+        for prefix in ('online_agent', 'eval', 'env'):
+            self.wandb_logger.define_metric(
+                f'{prefix}/*', step_metric='online/step', step_sync=False)
+        # Start the online clock without creating incomplete CSV metric rows.
+        # Keep this pending so the first environment log can use the same event step.
+        self.wandb_logger.log({'online/step': online_step}, step=step + 1, commit=False)
 
     def log(self, data: Dict, prefix: str, step: int):
         """Log data to CSV and WandB."""
         if not self.log_enabled:
             return
         assert prefix in self.csv_loggers, f"Unknown prefix: {prefix}"
-        self.csv_loggers[prefix].log(data, step=step)
+        is_online = (self.online_step_offset is not None and
+                     prefix in ('online_agent', 'eval', 'env'))
+        metric_step = step - self.online_step_offset if is_online else step
+        data = dict(data, step=metric_step)
+        self.csv_loggers[prefix].log(data, step=metric_step)
         if self.wandb_logger is not None:
-            self.wandb_logger.log({f'{prefix}/{k}': v for k, v in data.items()}, step=step)
+            metrics = {f'{prefix}/{k}': v for k, v in data.items()}
+            if is_online:
+                metrics['online/step'] = metric_step
+            self.wandb_logger.log(metrics, step=step)
 
     def close(self):
         """Close all CSV loggers."""

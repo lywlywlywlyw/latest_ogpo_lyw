@@ -27,19 +27,18 @@ log_prob_z_demo [N]. Finite latents have no +/-action_magnitude restriction.
 
 The decoder uses dx/dt = v(s,x,t), forward Euler at t=i/flow_steps,
 no intermediate clipping, and final [-1,1] clipping (DSRLNAAgent).
-We integrate the SAME velocity field backwards with explicit Euler:
+All inversion entry points use the SAME velocity field and query grid:
   x = demo_action
-  for i = flow_steps, ..., 1:
+  for i = flow_steps-1, ..., 0:
       x = x - v(s,x,i/flow_steps) / flow_steps
   z_demo = x
 The state s stays fixed. No clipping, optimization, or random initialization is
-applied during inversion. Reverse Euler approximates the inverse continuous
-flow; it is NOT an exact inverse of the finite-step forward Euler map. Final
+applied during inversion. This explicit subtraction on the reversed forward
+query grid is NOT an exact inverse of finite-step forward Euler. Final
 clipping is non-injective: at a boundary we start at the observed action itself
 and cannot recover its unknown pre-clipping value. We report boundary_action
 and forward round-trip errors without using them to optimize z_demo.
-Reference for reverse-time ODE integration (descending time_grid):
-https://github.com/facebookresearch/flow_matching/blob/main/flow_matching/solver/ode_solver.py
+The shared implementation is ogpo/agents/modules/flow_inverse.py.
 
 Only full within-episode chunks are used; terminal tails do not determine a
 full decoder input. Nonfinite inversions have NaN log probability. A large round-trip error is a
@@ -58,10 +57,27 @@ Joint clustering of ALL Square demos:
 Fits K=2..20 on all raw z, and separately reports an explicitly labeled
 sensitivity analysis excluding extreme norms (>10 times the median).
 
+Invert ALL demos at shifted reverse times, without clustering:
+  .venv/bin/python scripts/dsrlna/analyze_demo_latents.py --invert-all-shifted-times --steps 2000000 --batch-size 256
+All modes query 0.9,...,0 for flow_steps=10. This mode keeps the original forward
+decoder for reconstruction diagnostics, and writes a separate output folder.
+
+Fixed-state single-coordinate experiment:
+  .venv/bin/python scripts/dsrlna/analyze_demo_latents.py --latent-coordinate-experiment --steps 2000000 --batch-size 128
+Writes requested expert-relative effects, baseline-corrected effects, signed
+response curves, clipped/preclip Jacobians, and per-state coordinate metrics.
+
+Experiment 4 (Square): activity, block sensitivities, SVD and finite directions:
+  .venv/bin/python scripts/dsrlna/analyze_demo_latents.py --flow-geometry-experiment --steps 2000000 --batch-size 256
+Samples 25 trajectories x 4 relative-progress bins, prioritizes preclip
+geometry, and includes conditional-spread controls and trajectory bootstrap.
+--geometry-postprocess-from reuses saved model outputs without reinversion.
+
 """
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import pickle
@@ -70,6 +86,11 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+
+from ogpo.agents.modules.flow_inverse import (
+    FLOW_INVERSE_METHOD, FLOW_INVERSE_OUTPUT_DIR,
+    inverse_time_grid, invert_flow_actions_ode,
+)
 
 
 def parse_args():
@@ -98,13 +119,39 @@ def parse_args():
     p.add_argument('--cluster-all-trajectories', action='store_true', help='Invert all demos and cluster all raw z jointly; latest checkpoint by default')
     p.add_argument('--global-max-k', type=int, default=20)
     p.add_argument('--global-eval-samples', type=int, default=3000)
+    p.add_argument('--invert-all-shifted-times', action='store_true', help='Invert all valid Square chunks with the shared inverse, with norm/error diagnostics only; no clustering')
+    p.add_argument('--latent-coordinate-experiment', action='store_true', help='One-coordinate latent interventions at fixed offline states')
+    p.add_argument('--perturb-demo-id', type=int, default=226)
+    p.add_argument('--perturb-timestep', type=int, default=70)
+    p.add_argument('--perturb-num-states', type=int, default=8, help='Primary fixed state plus seeded states from other demos')
+    p.add_argument('--perturb-deltas', type=float, nargs='+', default=[-.5, -.25, -.1, -.05, .05, .1, .25, .5])
+    p.add_argument('--jacobian-minus-identity-from', type=Path, help='Small postprocessing-only J-I diagnostic from a saved latent-coordinate experiment')
+    p.add_argument('--latent-action-distance-experiment', action='store_true', help='Fixed-state latent/action distance relations around inverted demos')
+    p.add_argument('--distance-num-states', type=int, default=100)
+    p.add_argument('--distance-num-directions', type=int, default=20, help='Same random unit directions reused across radii and states')
+    p.add_argument('--distance-radii', type=float, nargs='+', default=[.1,.25,.5,1.,2.])
+    p.add_argument('--flow-geometry-experiment', action='store_true', help='Experiment 4: activity, component sensitivities, SVD and finite perturbations')
+    p.add_argument('--geometry-postprocess-from', type=Path, help='Regenerate experiment 4 statistics and plots from saved arrays; no model execution')
+    p.add_argument('--geometry-num-trajectories', type=int, default=25)
+    p.add_argument('--geometry-phase-bins', type=int, default=4)
+    p.add_argument('--geometry-prior-samples', type=int, default=128)
+    p.add_argument('--geometry-bootstrap', type=int, default=2000)
+    p.add_argument('--geometry-model-only', action='store_true', help='Save model outputs; statistics can be resumed with --geometry-postprocess-from')
     args = p.parse_args()
+    if min(args.geometry_num_trajectories, args.geometry_phase_bins) < 1 or args.geometry_prior_samples < 2 or args.geometry_bootstrap < 100:
+        p.error('geometry trajectory/phase counts must be positive; prior-samples >= 2 and bootstrap >= 100')
+    if args.distance_num_states < 1 or args.distance_num_directions < 2:
+        p.error('distance-num-states >= 1 and distance-num-directions >= 2 required')
+    if len(set(args.distance_radii)) < 2 or any(not math.isfinite(r) or r <= 0 for r in args.distance_radii):
+        p.error('At least two distinct finite positive distance-radii required')
+    if args.perturb_num_states < 1 or any(not math.isfinite(d) or d == 0 for d in args.perturb_deltas):
+        p.error('perturb-num-states >= 1 and finite nonzero perturb-deltas required')
     if args.global_max_k < 2 or args.global_eval_samples < 100:
         p.error('global-max-k >= 2 and global-eval-samples >= 100 required')
     if args.temporal_permutations < 19:
         p.error('temporal-permutations must be >= 19')
-    if sum((args.relationship_only, args.cluster_trajectories, args.cluster_all_trajectories, bool(args.temporal_clusters_from))) > 1:
-        p.error('relationship-only, cluster-trajectories, cluster-all-trajectories and temporal-clusters-from are mutually exclusive')
+    if sum((args.relationship_only, args.cluster_trajectories, args.cluster_all_trajectories, args.invert_all_shifted_times, args.latent_coordinate_experiment, args.latent_action_distance_experiment, args.flow_geometry_experiment, bool(args.geometry_postprocess_from), bool(args.jacobian_minus_identity_from), bool(args.temporal_clusters_from))) > 1:
+        p.error('Select only one analysis mode')
     if args.num_trajectories < 1 or args.cluster_max_k < 2:
         p.error('num-trajectories >= 1 and cluster-max-k >= 2 required')
     if min(args.batch_size, args.num_draws, args.num_negatives) < 1 or args.max_samples < 0 or args.tolerance <= 0:
@@ -160,32 +207,6 @@ def load_demos(path, horizon, max_samples, seed, selected_demo_ids=None):
     if max_samples and max_samples < total:
         idx = np.sort(np.random.default_rng(seed).choice(total, max_samples, replace=False))
     return {k: v[idx] for k, v in arrays.items()}, total
-
-
-def invert_flow_actions_ode(actor_fn, observations, actions, flow_steps, is_encoded=False):
-    """Reverse-time explicit Euler for the velocity field used by the decoder.
-
-    Forward: x[i+1] = x[i] + dt*v(s,x[i],i/K), i=0,...,K-1.
-    Reverse: y[i-1] = y[i] - dt*v(s,y[i],i/K), i=K,...,1; y[K]=a.
-    These approximate opposite directions of the same continuous ODE.
-    Explicit Euler is not time-reversible at finite dt, so generally y[0]
-    does not exactly undo the finite-step forward function. Neither the final
-    clip nor intermediate clips have a unique inverse. DSRLNA disables
-    intermediate clipping; its observed final clipped action is used as y[K].
-    """
-    import jax.numpy as jnp
-
-    if flow_steps < 1:
-        raise ValueError('flow_steps must be positive')
-    batch_size = observations.shape[0]
-    dt = 1.0 / flow_steps
-    x = actions
-    for i in range(flow_steps, 0, -1):
-        # Current time is 1 on the first reverse step, then 1-dt, ..., dt.
-        t = jnp.full((batch_size, 1), i / flow_steps)
-        vels = actor_fn(observations, x, t, is_encoded=is_encoded)
-        x = x - vels * dt
-    return x
 
 
 def latent_log_prob(dist, latents):
@@ -386,7 +407,7 @@ def analyze_demo_policy_relationship(output_dir, *, num_negatives=32, seed=1,
         negative_sampling='Uniform latent row from a different demo_id, with replacement; fixed across stages',
         action_magnitude=magnitude, strict_comparison='Ties, including -inf/-inf, are not wins; NaN pairs excluded',
         json_nonfinite='null means undefined; -inf string means zero density',
-        latent_provenance='reverse-time Euler; decoder final clipping and discretization affect z_demo',
+        latent_provenance='explicit subtraction; decoder final clipping and discretization affect z_demo',
         stages=records)
     summary_path = output_dir / 'demo_policy_relationship.json'
     summary_path.write_text(json.dumps(summary, indent=2, allow_nan=False) + '\n')
@@ -443,7 +464,7 @@ def plot_demo_policy_relationship(summary_path, output_prefix=None):
     return [Path(str(prefix) + '.' + extension) for extension in ('png', 'pdf')]
 
 
-def make_functions(config, dimension, args):
+def make_functions(config, dimension, args, return_decoder=False):
     import jax
     import jax.numpy as jnp
     from ogpo.networks import ActorVectorField
@@ -463,10 +484,11 @@ def make_functions(config, dimension, args):
     def velocity(params, s, x, t):
         return flow.apply({'params': params}, s, x, t, is_encoded=True)
 
-    def forward(params, s, z):
+    def forward(params, s, z, clip_final=True):
         return sample_flow_actions_ode(
             lambda obs, x, t, is_encoded: velocity(params, obs, x, t), s, None,
-            steps, dimension, act_min=-1., act_max=1., clip_intermediate=False,
+            steps, dimension, act_min=-1. if clip_final else -jnp.inf,
+            act_max=1. if clip_final else jnp.inf, clip_intermediate=False,
             noises=z, is_encoded=True)
 
     @jax.jit
@@ -488,6 +510,10 @@ def make_functions(config, dimension, args):
                     noise_mode=dist.mode(), z_prime_samples=samples, log_prob_z_demo=lp,
                     actor_support_contains_z=inside)
 
+    if return_decoder:
+        decode = jax.jit(lambda params, states, z: forward(params, states, z))
+        decode_raw = jax.jit(lambda params, states, z: forward(params, states, z, clip_final=False))
+        return invert, distribution, decode, decode_raw
     return invert, distribution
 
 
@@ -529,7 +555,7 @@ def analyze_trajectory_latent_clusters(args, run, config, paths):
     selected_paths = paths if args.steps else paths[-1:]
     for path in selected_paths:
         step = int(path.stem.split('_')[-1])
-        out = args.output / run.name / f'trajectory_clusters_step_{step}_seed_{args.seed}'
+        out = args.output / run.name / FLOW_INVERSE_OUTPUT_DIR / f'trajectory_clusters_step_{step}_seed_{args.seed}'
         out.mkdir(parents=True, exist_ok=True)
         with path.open('rb') as f:
             payload = pickle.load(f)
@@ -541,7 +567,8 @@ def analyze_trajectory_latent_clusters(args, run, config, paths):
         summary = dict(checkpoint=str(path), flow_sha256=digest.hexdigest(), dataset=str(args.dataset),
                        seed=args.seed, selected_demo_ids=ids, horizon=horizon,
                        latent_dimension=data['action_chunks'].shape[1], flow_steps=config['flow_steps'],
-                       inverse_method='reverse_time_explicit_euler; same invert as existing analysis',
+                       inverse_method=FLOW_INVERSE_METHOD,
+                       reverse_query_times=list(inverse_time_grid(config['flow_steps'])),
                        clustering='KMeans in raw latent space, n_init=20, no scaling; 3 independent seeds per K',
                        selection='maximum full-data silhouette over K=2..max_k; not evidence against K=1',
                        projection='per-trajectory PCA; visualization only', trajectories=[])
@@ -1079,14 +1106,44 @@ def analyze_all_demo_latent_clusters(args, run, config, paths):
 
     for path in (paths if args.steps else paths[-1:]):
         step = int(path.stem.split('_')[-1])
-        out = args.output / run.name / f'all_demo_clusters_step_{step}_seed_{args.seed}'
+        out = args.output / run.name / FLOW_INVERSE_OUTPUT_DIR / f'all_demo_clusters_step_{step}_seed_{args.seed}'
         out.mkdir(parents=True, exist_ok=True)
         checkpoint_sha = file_digest(path)
         identity = dict(checkpoint_sha256=checkpoint_sha, dataset_sha256=dataset_sha,
-                        horizon=horizon, inverse_method='reverse_time_explicit_euler', flow_steps=config['flow_steps'],
+                        horizon=horizon, inverse_method=FLOW_INVERSE_METHOD,
+                        reverse_query_times=list(inverse_time_grid(config['flow_steps'])), flow_steps=config['flow_steps'],
                         matmul_precision=os.environ.get('JAX_DEFAULT_MATMUL_PRECISION', 'default'), platform=args.platform)
         cache = out / 'all_latents.npz'
         identity_path = out / 'inversion_identity.json'
+        # The inversion-only experiment already covers every valid chunk. Reuse
+        # it only after checking weights, dataset, time grid, and exact inputs.
+        candidate_dir = args.output / run.name / f'all_demo_inverse_step_{step}_time_shift_1'
+        candidate = candidate_dir / 'all_latents.npz'
+        candidate_manifest = candidate_dir / 'summary.json'
+        if not cache.exists() and candidate.exists() and candidate_manifest.exists():
+            source = json.loads(candidate_manifest.read_text())
+            compatible = (source.get('checkpoint_sha256') == checkpoint_sha
+                          and source.get('dataset_sha256') == dataset_sha
+                          and source.get('reverse_query_times') == list(inverse_time_grid(config['flow_steps']))
+                          and source.get('flow_steps') == config['flow_steps']
+                          and source.get('horizon') == horizon
+                          and source.get('platform') == args.platform
+                          and source.get('batch_size') == args.batch_size
+                          and source.get('no_latent_filtering') is True)
+            if compatible:
+                with np.load(candidate) as saved:
+                    for key in data:
+                        np.testing.assert_array_equal(saved[key], data[key])
+                    imported = {key: saved[key] for key in
+                                ('z_demo', 'reconstructed_actions', 'reconstruction_max_abs')}
+                if imported['z_demo'].shape != (n, dimension) or not np.isfinite(imported['z_demo']).all():
+                    raise ValueError('Invalid inversion-only source cache')
+                np.savez_compressed(cache, **data, **imported)
+                identity_path.write_text(json.dumps(identity, indent=2) + '\n')
+                (out / 'inversion_source.json').write_text(json.dumps(dict(
+                    source=str(candidate), verified='checkpoint/dataset SHA256, grid, platform, batch size, all input arrays',
+                    num_demos=len(demo_lengths), num_latents=n), indent=2) + '\n')
+                print(f'Reused ALL {n} corrected-grid inversions from {candidate}', flush=True)
         if cache.exists() and identity_path.exists() and json.loads(identity_path.read_text()) == identity:
             with np.load(cache) as saved:
                 z, errors, rebuilt = (saved[k] for k in ('z_demo', 'reconstruction_max_abs', 'reconstructed_actions'))
@@ -1123,8 +1180,14 @@ def analyze_all_demo_latent_clusters(args, run, config, paths):
         plot_all_demo_latent_norms(out)
         print(f'Extreme norm threshold={extreme_threshold:.6g}; excluded in sensitivity only: {(~core).sum()}/{len(z)}', flush=True)
         analyze_cloud(z, data, errors, out, np.arange(len(z)), 'all_raw_z')
-        analyze_cloud(z[core], {key: values[core] for key, values in data.items()}, errors[core],
-                      out / 'typical_scale_sensitivity', np.flatnonzero(core), 'typical_scale_sensitivity')
+        if not core.all():
+            analyze_cloud(z[core], {key: values[core] for key, values in data.items()}, errors[core],
+                          out / 'typical_scale_sensitivity', np.flatnonzero(core), 'typical_scale_sensitivity')
+        else:
+            (out / 'sensitivity_not_needed.json').write_text(json.dumps(dict(
+                reason='No extreme inversions: the sensitivity subset is identical to the full dataset',
+                num_latents=n, excluded_count=0, threshold=extreme_threshold), indent=2) + '\n')
+            print('No extreme z; sensitivity subset is identical to ALL data, so no duplicate clustering.', flush=True)
 
 
 def plot_all_demo_latent_norms(output_dir):
@@ -1167,8 +1230,854 @@ def plot_all_demo_latent_norms(output_dir):
     return diagnostics
 
 
+def analyze_all_demo_shifted_inverse(args, run, config, paths):
+    """All-demo shared-grid inversion; no filtering or clustering.
+
+    Query times are (K-1)/K,...,0; K updates of -v/K. State stays fixed.
+    Forward reconstruction always uses the unchanged decoder at 0,...,(K-1)/K.
+    Uses the same shared inverse as every other current entry point.
+    Existing historical artifacts retain their original recorded values.
+    """
+    import csv
+    import h5py
+    import jax
+    import numpy as np
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    def sha256_file(path):
+        digest = hashlib.sha256()
+        with Path(path).open('rb') as f:
+            for block in iter(lambda: f.read(8*1024*1024), b''):
+                digest.update(block)
+        return digest.hexdigest()
+
+    def statistics(z, error):
+        norm = np.linalg.norm(z.astype(np.float64), axis=1)
+        finite = np.isfinite(z).all(1) & np.isfinite(norm)
+        valid_norm = norm[finite]
+        finite_error = error[np.isfinite(error)]
+        median = float(np.median(valid_norm)) if len(valid_norm) else None
+        stats = dict(num_samples=len(z), finite_count=int(finite.sum()), nonfinite_count=int((~finite).sum()),
+                     norm_quantiles={str(q):float(np.quantile(valid_norm,q)) if len(valid_norm) else None for q in (.5,.9,.99,.999,1.)},
+                     norm_counts_above={str(t):int((norm>t).sum()) for t in (5,10,20,50,100,1000,10000,1000000)},
+                     ten_median_threshold=10*median if median is not None else None,
+                     count_above_ten_median=int((norm>10*median).sum()) if median is not None else None,
+                     roundtrip_nonfinite_count=int((~np.isfinite(error)).sum()),
+                     roundtrip_median=float(np.median(finite_error)) if len(finite_error) else None,
+                     roundtrip_p95=float(np.quantile(finite_error,.95)) if len(finite_error) else None,
+                     roundtrip_max=float(np.max(finite_error)) if len(finite_error) else None)
+        return norm, stats
+
+    horizon = config['horizon_length'] if config['action_chunking'] else 1
+    data, available = load_demos(args.dataset, horizon, 0, args.seed)
+    n, dimension = data['action_chunks'].shape
+    with h5py.File(args.dataset,'r') as f:
+        lengths={int(name[5:]):len(f['data'][name]['actions']) for name in f['data']}
+    if set(np.unique(data['demo_id'])) != set(lengths):
+        raise ValueError('Some demo has no valid chunks')
+    if not all(np.isfinite(data[key]).all() for key in ('observations','action_chunks')):
+        raise ValueError('Nonfinite demo inputs')
+    if np.max(np.abs(data['action_chunks']))>1:
+        raise ValueError('Demo action outside [-1,1]')
+    dataset_sha=sha256_file(args.dataset)
+    reverse_times=list(inverse_time_grid(config['flow_steps']))
+    invert,_=make_functions(config,dimension,args)
+    print(f'Square ALL demos={len(lengths)}, transitions={sum(lengths.values())}, valid chunks={n}, dimension={dimension}, reverse query times={reverse_times}',flush=True)
+    for path in (paths if args.steps else paths[-1:]):
+        step=int(path.stem.split('_')[-1])
+        out=args.output/run.name/f'all_demo_inverse_step_{step}_time_shift_1'
+        out.mkdir(parents=True,exist_ok=True)
+        checkpoint_sha=sha256_file(path)
+        with path.open('rb') as f:payload=pickle.load(f)
+        params=payload['agent']['bc_flow_network']['params']['modules_actor_bc_flow']
+        del payload
+        z=np.empty((n,dimension),dtype=np.float32)
+        rebuilt=np.empty_like(z)
+        errors=np.empty(n,dtype=np.float32)
+        for start in range(0,n,args.batch_size):
+            end=min(start+args.batch_size,n);pad=args.batch_size-(end-start)
+            states=np.pad(data['observations'][start:end],((0,pad),(0,0)),mode='edge')
+            actions=np.pad(data['action_chunks'][start:end],((0,pad),(0,0)),mode='edge')
+            values=invert(params,states,actions)
+            for target,value in zip((z,rebuilt,errors),values):target[start:end]=np.asarray(value)[:end-start]
+            if start==0 or end==n or (start//args.batch_size)%20==0:
+                print(f'Shifted inverse {end}/{n}',flush=True)
+        del params
+        norms,new_stats=statistics(z,errors)
+        np.savez_compressed(out/'all_latents.npz',**data,z_demo=z,reconstructed_actions=rebuilt,
+                            reconstruction_max_abs=errors,latent_norm=norms,inverse_finite=np.isfinite(z).all(1),
+                            reverse_query_times=np.asarray(reverse_times))
+        finite_idx=np.flatnonzero(np.isfinite(norms))
+        maximum=int(finite_idx[np.argmax(norms[finite_idx])]) if len(finite_idx) else None
+        summary=dict(checkpoint=str(path),dataset=str(args.dataset.resolve()),checkpoint_sha256=checkpoint_sha,
+                     dataset_sha256=dataset_sha,platform=args.platform,batch_size=args.batch_size,
+                     num_demos=len(lengths),num_raw_transitions=sum(lengths.values()),num_valid_chunks=available,
+                     horizon=horizon,latent_dimension=dimension,flow_steps=config['flow_steps'],dt=1/config['flow_steps'],
+                     inverse_method=FLOW_INVERSE_METHOD,reverse_time_shift=1,
+                     reverse_query_times=reverse_times,forward_query_times=[i/config['flow_steps'] for i in range(config['flow_steps'])],
+                     no_latent_filtering=True,clustering_performed=False,statistics=new_stats,
+                     maximum_finite_sample=dict(source_row=maximum,demo_id=int(data['demo_id'][maximum]),
+                                                timestep=int(data['timestep'][maximum]),latent_norm=float(norms[maximum]),
+                                                roundtrip_max_abs=float(errors[maximum])) if maximum is not None else None)
+        baseline=args.output/run.name/f'all_demo_clusters_step_{step}_seed_{args.seed}'/'all_latents.npz'
+        old_norms=None
+        if baseline.exists():
+            identity_path=baseline.parent/'inversion_identity.json'
+            identity=json.loads(identity_path.read_text())
+            if identity['checkpoint_sha256']!=checkpoint_sha or identity['dataset_sha256']!=dataset_sha:
+                raise ValueError('Baseline checkpoint/dataset identity mismatch')
+            with np.load(baseline) as old:
+                np.testing.assert_array_equal(old['demo_id'],data['demo_id'])
+                np.testing.assert_array_equal(old['timestep'],data['timestep'])
+                np.testing.assert_array_equal(old['action_chunks'],data['action_chunks'])
+                old_norms,old_stats=statistics(old['z_demo'],old['reconstruction_max_abs'])
+                old_errors=old['reconstruction_max_abs'].copy()
+            old_extreme=old_norms>old_stats['ten_median_threshold']
+            paired=[dict(source_row=int(i),demo_id=int(data['demo_id'][i]),timestep=int(data['timestep'][i]),
+                         old_norm=float(old_norms[i]),new_norm=float(norms[i]),
+                         old_roundtrip_max_abs=float(old_errors[i]),new_roundtrip_max_abs=float(errors[i])) for i in np.flatnonzero(old_extreme)]
+            summary.update(baseline_path=str(baseline),baseline_statistics=old_stats,
+                           old_extreme_samples=paired,
+                           new_count_above_old_extreme_threshold=int((norms>old_stats['ten_median_threshold']).sum()))
+            with (out/'old_extreme_samples_comparison.csv').open('w') as f:
+                writer=csv.DictWriter(f,fieldnames=list(paired[0]));writer.writeheader();writer.writerows(paired)
+        order=np.argsort(-np.where(np.isnan(norms),np.inf,norms))
+        with (out/'largest_100_norms.csv').open('w') as f:
+            writer=csv.writer(f);writer.writerow(['rank','source_row','demo_id','timestep','latent_norm','old_latent_norm','roundtrip_max_abs'])
+            writer.writerows((rank+1,int(i),int(data['demo_id'][i]),int(data['timestep'][i]),float(norms[i]),
+                             float(old_norms[i]) if old_norms is not None else '',float(errors[i])) for rank,i in enumerate(order[:100]))
+        with (out/'per_demo_statistics.csv').open('w') as f:
+            writer=csv.writer(f);writer.writerow(['demo_id','raw_transitions','valid_z','nonfinite_z','median_norm','max_finite_norm','count_norm_gt_10','count_norm_gt_100','count_norm_gt_1000'])
+            for demo,length in sorted(lengths.items()):
+                values=norms[data['demo_id']==demo];finite=values[np.isfinite(values)]
+                writer.writerow([demo,length,len(values),int((~np.isfinite(values)).sum()),float(np.median(finite)),float(finite.max()),int((values>10).sum()),int((values>100).sum()),int((values>1000).sum())])
+        (out/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
+        fig,axes=plt.subplots(1,3 if old_norms is not None else 2,figsize=(17 if old_norms is not None else 12,5))
+        positive=norms[np.isfinite(norms)&(norms>0)]
+        old_positive=old_norms[np.isfinite(old_norms)&(old_norms>0)] if old_norms is not None else positive
+        bins=np.geomspace(min(positive.min(),old_positive.min()),max(positive.max(),old_positive.max())*1.01,100)
+        if old_norms is not None:axes[0].hist(old_positive,bins=bins,histtype='step',label='Old t=1,...,0.1',linewidth=1.5)
+        axes[0].hist(positive,bins=bins,histtype='step',label='New t=0.9,...,0',linewidth=1.5)
+        axes[0].set(xscale='log',yscale='log',xlabel='||z|| (log)',ylabel='Count (log)',title='All demo latent norms');axes[0].legend()
+        axes[1].scatter(np.arange(n),norms,s=1,alpha=.4)
+        axes[1].set(yscale='log',xlabel='Source row (demo/time order)',ylabel='New ||z|| (log)',title=f'New grid: maximum norm={positive.max():.4g}')
+        if old_norms is not None:
+            both=np.isfinite(old_norms)&np.isfinite(norms)&(old_norms>0)&(norms>0)
+            axes[2].scatter(old_norms[both],norms[both],s=1,alpha=.25)
+            axes[2].plot([bins[0],bins[-1]],[bins[0],bins[-1]],'k--',linewidth=.8)
+            axes[2].set(xscale='log',yscale='log',xlabel='Old ||z||',ylabel='New ||z||',title='Same transitions: old vs new')
+        fig.suptitle(f'Square: ALL {len(lengths)} demos, {n} valid chunks; shifted reverse times only')
+        fig.tight_layout();fig.savefig(out/'norm_comparison.png',dpi=180);plt.close(fig)
+        lines=['# 全部Square demo：反解时间改为0.9到0','',
+               f'Checkpoint：`{path}`。数据集：`{args.dataset}`。',
+               f'共{len(lengths)}条demo、{sum(lengths.values()):,}个原始transition，全部{n:,}个有效完整动作窗口反解为{dimension}维z。',
+               f'反解网络查询时间：{reverse_times}；共{config["flow_steps"]}次更新，每次x←x−0.1v。',
+               '固定状态，不裁剪z，不过滤异常值，不重新聚类。末尾不足4步或跨done的窗口按原loader规则排除。',
+               '重建始终用原decoder：查询t=0,…,0.9，无中间裁剪、最终动作裁剪至[-1,1]。','',
+               '## 模长对比','', '| 指标 | 旧网格1→0.1 | 新网格0.9→0 |','|---|---:|---:|']
+        old_stats=summary.get('baseline_statistics',{})
+        for q in (.5,.9,.99,.999,1.):
+            old_value=old_stats.get('norm_quantiles',{}).get(str(q))
+            lines.append(f'| 模长分位数{q:g} | {old_value} | {new_stats["norm_quantiles"][str(q)]} |')
+        for threshold in (10,20,50,100,1000,10000,1000000):
+            lines.append(f'| 模长>{threshold}的数量 | {old_stats.get("norm_counts_above",{}).get(str(threshold))} | {new_stats["norm_counts_above"][str(threshold)]} |')
+        lines += [f'| 非有限z数量 | {old_stats.get("nonfinite_count")} | {new_stats["nonfinite_count"]} |',
+                  f'| 重建误差中位数 | {old_stats.get("roundtrip_median")} | {new_stats["roundtrip_median"]} |',
+                  f'| 重建误差95分位 | {old_stats.get("roundtrip_p95")} | {new_stats["roundtrip_p95"]} |','',
+                  '## 新网格下最大模长样本','', '```json',json.dumps(summary['maximum_finite_sample'],indent=2),'```','',
+                  '旧极端样本的新旧模长和重建误差见old_extreme_samples_comparison.csv；新网格最大100个样本见largest_100_norms.csv；每条轨迹覆盖和统计见per_demo_statistics.csv。',
+                  '全部未经筛选的z、原状态/动作、demo ID、时间步和重建误差保存在all_latents.npz。','',
+                  '复现：','```bash',f'.venv/bin/python scripts/dsrlna/analyze_demo_latents.py --invert-all-shifted-times --steps {step} --batch-size {args.batch_size} --platform {args.platform}','```','']
+        (out/'REPORT.md').write_text('\n'.join(lines))
+        print(json.dumps(dict(statistics=new_stats,maximum=summary['maximum_finite_sample'])),flush=True)
+        print(f'All-demo shifted inverse results: {out}',flush=True)
+
+
+def analyze_latent_coordinate_interventions(args, run, config, paths):
+    """Fixed-state, single-coordinate interventions in the raw 28D decoder input.
+
+    Store BOTH a_perturbed-a_expert (requested) and a_perturbed-D(s,z0),
+    separating reconstruction bias from intervention effects. Actual actions
+    retain final clipping; pre-clipping outputs/Jacobians are diagnostics only.
+    """
+    import csv
+    import h5py
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    def digest_file(path):
+        digest = hashlib.sha256()
+        with Path(path).open('rb') as f:
+            for block in iter(lambda: f.read(8*1024*1024), b''):
+                digest.update(block)
+        return digest.hexdigest()
+
+    horizon = config['horizon_length'] if config['action_chunking'] else 1
+    data, available = load_demos(args.dataset, horizon, 0, args.seed)
+    primary = np.flatnonzero((data['demo_id']==args.perturb_demo_id) & (data['timestep']==args.perturb_timestep))
+    if len(primary)!=1:
+        raise ValueError('Primary demo/timestep is missing or has no valid full action window')
+    rng = np.random.default_rng(args.seed)
+    other_demos = np.setdiff1d(np.unique(data['demo_id']), [args.perturb_demo_id])
+    if args.perturb_num_states > len(other_demos)+1:
+        raise ValueError('Requested more independent demo states than available demos')
+    selected = [int(primary[0])]
+    for demo in rng.choice(other_demos, args.perturb_num_states-1, replace=False):
+        selected.append(int(rng.choice(np.flatnonzero(data['demo_id']==demo))))
+    rows=np.asarray(selected)
+    states=data['observations'][rows]
+    experts=data['action_chunks'][rows]
+    dimension=experts.shape[1]
+    action_dim=dimension//horizon
+    if action_dim!=7:
+        raise ValueError('This coordinate experiment labels Square seven-component actions')
+    deltas=np.asarray(sorted(set(args.perturb_deltas)),dtype=np.float32)
+    names=('x','y','z','rx','ry','rz','g')
+    action_labels=[f'{h}:{name}' for h in range(horizon) for name in names]
+    latent_labels=[f'z{d}' for d in range(dimension)]
+    K=config['flow_steps'];eps=.001
+    chosen_delta=int(np.argmin(np.abs(deltas-.25)))
+    dataset_sha=digest_file(args.dataset)
+    invert,_,decode,decode_raw=make_functions(config,dimension,args,return_decoder=True)
+
+    def decode_batches(params, batch_states, batch_z):
+        clipped=[];raw=[]
+        for start in range(0,len(batch_z),args.batch_size):
+            end=min(start+args.batch_size,len(batch_z));pad=args.batch_size-(end-start)
+            ss=np.pad(batch_states[start:end],((0,pad),(0,0)),mode='edge')
+            zz=np.pad(batch_z[start:end],((0,pad),(0,0)),mode='edge')
+            # One raw decoder pass; the actual action is its final [-1,1] clip.
+            r=np.asarray(decode_raw(params,ss,zz))[:end-start]
+            raw.append(r);clipped.append(np.clip(r,-1,1))
+        return np.concatenate(clipped),np.concatenate(raw)
+
+    @jax.jit
+    def local_jacobians(params,state,z):
+        def outputs(latent):
+            raw=decode_raw(params,state[None],latent[None])[0]
+            return jnp.stack((jnp.clip(raw,-1,1),raw))
+        return jax.jacfwd(outputs)(z)
+
+    same_component=np.equal.outer(np.arange(dimension)%7,np.arange(dimension)%7)
+    same_step=np.equal.outer(np.arange(dimension)//7,np.arange(dimension)//7)
+    arm=np.flatnonzero(np.arange(dimension)%7!=6)
+
+    def matrix_metrics(jac):
+        e=np.square(jac.astype(np.float64));total=float(e.sum())
+        per_col=e.sum(0);active=np.sqrt(per_col)>1e-4
+        diag=np.diag(e)
+        arm_matrix=e[np.ix_(arm,arm)]
+        return dict(total_sensitivity_energy=total,active_latent_dimensions=int(active.sum()),
+                    inactive_latent_dimensions=np.flatnonzero(~active).tolist(),
+                    exact_diagonal_energy_fraction=float(diag.sum()/max(total,1e-30)),
+                    same_action_component_energy_fraction=float(e[same_component].sum()/max(total,1e-30)),
+                    same_chunk_step_energy_fraction=float(e[same_step].sum()/max(total,1e-30)),
+                    diagonal_argmax_fraction_active=float(np.mean(np.argmax(np.abs(jac),axis=0)[active]==np.arange(dimension)[active])) if active.any() else None,
+                    arm_only_diagonal_energy_fraction=float(np.trace(arm_matrix)/max(float(arm_matrix.sum()),1e-30)),
+                    arm_only_same_component_energy_fraction=float(arm_matrix[same_component[np.ix_(arm,arm)]].sum()/max(float(arm_matrix.sum()),1e-30)))
+
+    def draw_matrix(ax,matrix,title,row_labels=None,column_labels=None,normalize=False):
+        matrix=matrix.copy()
+        if normalize:
+            matrix=np.abs(matrix)/np.maximum(np.max(np.abs(matrix),axis=0,keepdims=True),1e-12)
+            image=ax.imshow(matrix,cmap='viridis',vmin=0,vmax=1,aspect='auto')
+        else:
+            vmax=max(float(np.max(np.abs(matrix))),1e-8)
+            image=ax.imshow(matrix,cmap='RdBu_r',vmin=-vmax,vmax=vmax,aspect='auto')
+        rr=row_labels if row_labels is not None else action_labels
+        cc=column_labels if column_labels is not None else latent_labels
+        ax.set(xticks=np.arange(len(cc)),xticklabels=cc,yticks=np.arange(len(rr)),yticklabels=rr,
+               xlabel='Perturbed latent coordinate (column)',ylabel='Action coordinate (row)',title=title)
+        ax.tick_params(axis='x',labelrotation=90,labelsize=6);ax.tick_params(axis='y',labelsize=6)
+        if matrix.shape==(dimension,dimension):
+            for x in np.arange(6.5,dimension,7):
+                ax.axvline(x,color='black',linewidth=.7,alpha=.6);ax.axhline(x,color='black',linewidth=.7,alpha=.6)
+        return image
+
+    print(f'Coordinate interventions: {len(rows)} fixed states, {dimension} latent coordinates, deltas={deltas.tolist()}',flush=True)
+    print('States: '+str([(int(data['demo_id'][i]),int(data['timestep'][i])) for i in rows]),flush=True)
+    for path in (paths if args.steps else paths[-1:]):
+        step=int(path.stem.split('_')[-1])
+        out=args.output/run.name/FLOW_INVERSE_OUTPUT_DIR/f'latent_coordinate_step_{step}_seed_{args.seed}'
+        out.mkdir(parents=True,exist_ok=True)
+        checkpoint_sha=digest_file(path)
+        with path.open('rb') as f:payload=pickle.load(f)
+        params=payload['agent']['bc_flow_network']['params']['modules_actor_bc_flow'];del payload
+        z0,rebuilt,errors=[np.asarray(v) for v in invert(params,states,experts)]
+        baseline,raw_baseline=decode_batches(params,states,z0)
+        np.testing.assert_allclose(baseline,rebuilt,rtol=1e-5,atol=2e-6)
+        eye=np.eye(dimension,dtype=np.float32)
+        perturbed_z=z0[:,None,None,:]+deltas[None,:,None,None]*eye[None,None,:,:]
+        all_states=np.broadcast_to(states[:,None,None,:],(len(rows),len(deltas),dimension,states.shape[1])).reshape(-1,states.shape[1])
+        perturbed_actions,raw_actions=decode_batches(params,all_states,perturbed_z.reshape(-1,dimension))
+        shape=(len(rows),len(deltas),dimension,dimension)
+        perturbed_actions=perturbed_actions.reshape(shape);raw_actions=raw_actions.reshape(shape)
+        delta_expert=perturbed_actions-experts[:,None,None,:]
+        delta_latent=perturbed_actions-baseline[:,None,None,:]
+        raw_delta_latent=raw_actions-raw_baseline[:,None,None,:]
+        np.testing.assert_allclose(delta_expert,delta_latent+(baseline-experts)[:,None,None,:],rtol=2e-5,atol=2e-7)
+        jacobians=np.stack([np.asarray(local_jacobians(params,s,z)) for s,z in zip(states,z0)])
+        # Independent small finite-difference check of the autodiff sensitivity.
+        fd_z=z0[:,None,None,:]+np.array([-eps,eps],np.float32)[None,:,None,None]*eye[None,None,:,:]
+        fd_states=np.broadcast_to(states[:,None,None,:],(len(rows),2,dimension,states.shape[1])).reshape(-1,states.shape[1])
+        fd_actions,fd_raw=decode_batches(params,fd_states,fd_z.reshape(-1,dimension))
+        fd_actions=fd_actions.reshape(len(rows),2,dimension,dimension)
+        fd_raw=fd_raw.reshape(len(rows),2,dimension,dimension)
+        fd_jac=np.swapaxes((fd_actions[:,1]-fd_actions[:,0])/(2*eps),1,2)
+        fd_raw_jac=np.swapaxes((fd_raw[:,1]-fd_raw[:,0])/(2*eps),1,2)
+        records=[]
+        for b,row in enumerate(rows):
+            record=dict(demo_id=int(data['demo_id'][row]),timestep=int(data['timestep'][row]),source_row=int(row),
+                        primary=(b==0),latent_norm=float(np.linalg.norm(z0[b].astype(np.float64))),
+                        reconstruction_max_abs=float(np.max(np.abs(baseline[b]-experts[b]))),
+                        reconstructed_clipped_coordinates=np.flatnonzero(np.abs(raw_baseline[b])>=1).tolist(),
+                        clipped=matrix_metrics(jacobians[b,0]),preclip=matrix_metrics(jacobians[b,1]),
+                        finite_difference_epsilon=eps,
+                        finite_difference_relative_fro_error=float(np.linalg.norm(fd_jac[b]-jacobians[b,0])/max(np.linalg.norm(jacobians[b,0]),1e-12)),
+                        preclip_fd_relative_fro_error=float(np.linalg.norm(fd_raw_jac[b]-jacobians[b,1])/max(np.linalg.norm(jacobians[b,1]),1e-12)))
+            records.append(record)
+            print(f'demo_{record["demo_id"]} t={record["timestep"]}: diagonal energy={record["clipped"]["exact_diagonal_energy_fraction"]:.3f}, same-component energy={record["clipped"]["same_action_component_energy_fraction"]:.3f}, roundtrip={record["reconstruction_max_abs"]:.4f}',flush=True)
+        np.savez_compressed(out/'interventions.npz',demo_id=data['demo_id'][rows],timestep=data['timestep'][rows],source_rows=rows,
+                            states=states,expert_actions=experts,z0=z0,baseline_actions=baseline,raw_baseline_actions=raw_baseline,
+                            deltas=deltas,perturbed_z=perturbed_z,perturbed_actions=perturbed_actions,raw_perturbed_actions=raw_actions,
+                            delta_vs_expert=delta_expert,delta_vs_rebuilt=delta_latent,raw_delta_vs_rebuilt=raw_delta_latent,
+                            jacobian_clipped=jacobians[:,0],jacobian_preclip=jacobians[:,1],finite_difference_jacobian=fd_jac,
+                            finite_difference_preclip_jacobian=fd_raw_jac,finite_difference_epsilon=eps)
+        primary_dir=out/f'demo_{records[0]["demo_id"]}_t_{records[0]["timestep"]}'
+        primary_dir.mkdir(exist_ok=True)
+        for label,matrix in (('jacobian_clipped',jacobians[0,0]),('jacobian_preclip',jacobians[0,1]),
+                             ('requested_delta_expert',delta_expert[0,chosen_delta].T),('delta_rebuilt',delta_latent[0,chosen_delta].T)):
+            with (primary_dir/f'{label}.csv').open('w') as f:
+                writer=csv.writer(f);writer.writerow(['action_row/latent_column']+latent_labels)
+                writer.writerows([action_labels[i]]+matrix[i].tolist() for i in range(dimension))
+        with (primary_dir/'perturbations_long.csv').open('w') as f:
+            writer=csv.writer(f);writer.writerow(['delta','latent_dimension','action_step','action_component','expert_action','rebuilt_action','perturbed_action','delta_vs_expert','delta_vs_rebuilt','preclip_action'])
+            for q,delta in enumerate(deltas):
+                for i in range(dimension):
+                    for j in range(dimension):
+                        writer.writerow([float(delta),i,j//7,names[j%7],float(experts[0,j]),float(baseline[0,j]),float(perturbed_actions[0,q,i,j]),float(delta_expert[0,q,i,j]),float(delta_latent[0,q,i,j]),float(raw_actions[0,q,i,j])])
+        fig,axes=plt.subplots(2,2,figsize=(16,14))
+        matrices=[delta_expert[0,chosen_delta].T,delta_latent[0,chosen_delta].T,jacobians[0,0],jacobians[0,0,:7,:7]]
+        titles=[f'Requested: a(z0+delta*e_i) - expert; delta={deltas[chosen_delta]:g}',
+                f'Intervention only: a(z0+delta*e_i) - a(z0); delta={deltas[chosen_delta]:g}',
+                'Local action sensitivity da/dz (actual clipped decoder)', 'First action vs first seven latent coordinates']
+        for index,(ax,matrix,title) in enumerate(zip(axes.flat,matrices,titles)):
+            img=draw_matrix(ax,matrix,title,action_labels[:7] if index==3 else None,latent_labels[:7] if index==3 else None)
+            fig.colorbar(img,ax=ax,shrink=.8)
+        fig.suptitle(f'Fixed Square state demo_{records[0]["demo_id"]}, t={records[0]["timestep"]}; columns=latent, rows=action; rotation components are axis-angle increments')
+        fig.tight_layout();fig.savefig(primary_dir/'action_effects.png',dpi=180);fig.savefig(primary_dir/'action_effects.pdf');plt.close(fig)
+        fig,axes=plt.subplots(1,3,figsize=(20,7))
+        for ax,matrix,title,norm in zip(axes,[jacobians[0,0],jacobians[0,1],jacobians[0,0]],
+                                      ['Actual action Jacobian','Pre-final-clip Jacobian (diagnostic)','Absolute sensitivity / column maximum'],[False,False,True]):
+            img=draw_matrix(ax,matrix,title,normalize=norm);fig.colorbar(img,ax=ax,shrink=.8)
+        fig.tight_layout();fig.savefig(primary_dir/'jacobian_diagnostics.png',dpi=180);plt.close(fig)
+        # Direct response curves for the first seven input coordinates/first action.
+        fig,axes=plt.subplots(2,4,figsize=(17,8))
+        curve_delta=np.r_[deltas[deltas<0],0.,deltas[deltas>0]]
+        for i,ax in enumerate(axes.flat):
+            if i==7:ax.axis('off');continue
+            curve=np.insert(delta_latent[0,:,i,:7],int((deltas<0).sum()),0,axis=0)
+            for j,name in enumerate(names):ax.plot(curve_delta,curve[:,j],marker='.',label=name,linewidth=1.2)
+            ax.axhline(0,color='gray',linewidth=.5);ax.axvline(0,color='gray',linewidth=.5)
+            ax.set(title=f'Perturb z[{i}] only',xlabel='delta',ylabel='First-action change vs a(z0)');ax.grid(alpha=.2)
+        handles,labels=axes.flat[0].get_legend_handles_labels();axes.flat[7].legend(handles,labels,loc='center',ncol=2)
+        fig.suptitle('Signed one-coordinate interventions at the SAME offline state; no state changes')
+        fig.tight_layout();fig.savefig(primary_dir/'response_curves.png',dpi=180);plt.close(fig)
+        plot_rows=(len(rows)+3)//4
+        fig,axes=plt.subplots(plot_rows,4,figsize=(18,4.5*plot_rows),squeeze=False)
+        vmax=max(float(np.quantile(np.abs(jacobians[:,0]),.99)),1e-6)
+        for b,ax in enumerate(axes.flat):
+            if b>=len(rows):ax.axis('off');continue
+            ax.imshow(jacobians[b,0],cmap='RdBu_r',vmin=-vmax,vmax=vmax,aspect='auto')
+            ax.set(title=f'demo_{records[b]["demo_id"]} t={records[b]["timestep"]}; diag={records[b]["clipped"]["exact_diagonal_energy_fraction"]:.2f}',xlabel='Latent column',ylabel='Action row')
+            for line in (6.5,13.5,20.5):ax.axvline(line,color='black',linewidth=.4);ax.axhline(line,color='black',linewidth=.4)
+        fig.suptitle('Independent fixed-state Jacobians; SAME color scale, K=10 inverse times 0.9,...,0')
+        fig.tight_layout();fig.savefig(out/'states_overview.png',dpi=180);plt.close(fig)
+        summary=dict(checkpoint=str(path),checkpoint_sha256=checkpoint_sha,dataset=str(args.dataset.resolve()),dataset_sha256=dataset_sha,
+                     inverse_method=FLOW_INVERSE_METHOD,reverse_query_times=list(inverse_time_grid(K)),forward_query_times=[i/K for i in range(K)],
+                     seed=args.seed,num_states=len(rows),horizon=horizon,action_dim=7,latent_dimension=dimension,deltas=deltas.tolist(),
+                     matrix_orientation='rows=flattened output action; columns=perturbed latent dimension; indices zero-based',
+                     action_component_labels=names,rotation_convention='OSC_POSE axis-angle increments, not Euler angles',
+                     action_units='Normalized controller commands, not measured end-effector motion',
+                     definitions=dict(requested='D(s,z0+delta*e_i)-expert_action',intervention_only='D(s,z0+delta*e_i)-D(s,z0)',
+                                      jacobian='autodiff derivative of ORIGINAL decoder with final clipping; preclip saved separately'),
+                     states=records)
+        canonical=args.output/run.name/f'all_demo_inverse_step_{step}_time_shift_1'
+        if (canonical/'summary.json').exists():
+            cached_meta=json.loads((canonical/'summary.json').read_text())
+            if cached_meta['checkpoint_sha256']==checkpoint_sha and cached_meta['dataset_sha256']==dataset_sha:
+                with np.load(canonical/'all_latents.npz') as cache:
+                    np.testing.assert_array_equal(cache['demo_id'][rows],data['demo_id'][rows])
+                    np.testing.assert_array_equal(cache['timestep'][rows],data['timestep'][rows])
+                    np.testing.assert_allclose(cache['z_demo'][rows],z0,rtol=2e-5,atol=2e-5)
+                    summary['max_inverse_difference_to_validated_full_dataset']=float(np.max(np.abs(cache['z_demo'][rows]-z0)))
+        (out/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
+        with (out/'state_metrics.csv').open('w') as f:
+            writer=csv.writer(f);writer.writerow(['demo_id','timestep','reconstruction_max_abs','clipped_diagonal_energy','clipped_same_component_energy','clipped_same_step_energy','preclip_diagonal_energy','preclip_same_component_energy','arm_only_diagonal_energy','active_latent_dimensions','fd_relative_error'])
+            for r in records:writer.writerow([r['demo_id'],r['timestep'],r['reconstruction_max_abs'],r['clipped']['exact_diagonal_energy_fraction'],r['clipped']['same_action_component_energy_fraction'],r['clipped']['same_chunk_step_energy_fraction'],r['preclip']['exact_diagonal_energy_fraction'],r['preclip']['same_action_component_energy_fraction'],r['clipped']['arm_only_diagonal_energy_fraction'],r['clipped']['active_latent_dimensions'],r['finite_difference_relative_fro_error']])
+        lines=['# 实验1：固定状态，逐维扰动latent，检查动作坐标对应关系','',
+               f'Checkpoint：`{path}`；数据集：`{args.dataset}`。',
+               f'主样本：demo_{records[0]["demo_id"]}, t={records[0]["timestep"]}，动作窗口包含连续{horizon}步。另取{len(rows)-1}个其他demo的固定状态作重复。',
+               f'使用当前共享反解t=0.9,…,0，得到z0；每次只改变28维中的一个坐标，delta={deltas.tolist()}。每次解码均固定对应状态s，保持原10步前向和最终[-1,1]裁剪，不对z施加tanh/裁剪。','',
+               '## 如何看图','',
+               f'[主样本影响矩阵](demo_{records[0]["demo_id"]}_t_{records[0]["timestep"]}/action_effects.png)：行是动作输出，列是被扰动的z坐标；每7行/列是一组。',
+               '左上是用户定义a′−专家a0；右上减去重建动作D(s,z0)，仅显示扰动的影响。两者之差就是反解的重建偏差，不能把该偏差当成latent耦合。',
+               '左下为局部Jacobian，右下放大第一步动作与前7个latent坐标；对角能量越集中，越支持相同索引的局部对应。',
+               f'[正负扰动响应曲线](demo_{records[0]["demo_id"]}_t_{records[0]["timestep"]}/response_curves.png)：每格只改变一个z，线条为第一步动作的7个分量。',
+               f'[裁剪诊断](demo_{records[0]["demo_id"]}_t_{records[0]["timestep"]}/jacobian_diagnostics.png)：对照原decoder与最终裁剪前的敏感度；饱和行可能有零响应，并不表示原始flow不受该latent影响。','',
+               '## 指标定义','',
+               '精确对角能量=ΣJ[i,i]^2/ΣJ[j,i]^2；同动作分量能量允许跨4步但要求j%7=i%7；同时间步能量要求j//7=i//7。还报告排除夹爪后的24×24矩阵指标，避免夹爪主导。',
+               '局部Jacobian另用±0.001的中心差分核对；clip边界或非线性可能导致差分与点导数不同。','',
+               '| demo | t | 重建最大误差 | 精确对角能量 | 同动作分量能量 | 同时间步能量 | 去夹爪对角能量 |',
+               '|---|---:|---:|---:|---:|---:|---:|']
+        for r in records:lines.append(f'| {r["demo_id"]} | {r["timestep"]} | {r["reconstruction_max_abs"]:.4f} | {r["clipped"]["exact_diagonal_energy_fraction"]:.3f} | {r["clipped"]["same_action_component_energy_fraction"]:.3f} | {r["clipped"]["same_chunk_step_energy_fraction"]:.3f} | {r["clipped"]["arm_only_diagonal_energy_fraction"]:.3f} |')
+        lines += ['', 'x/y/z与rx/ry/rz/g是归一化控制命令；Square OSC_POSE的旋转分量是轴角增量，不是欧拉角，也不是实际测量到的末端位姿变化。',
+                  '该实验检验固定状态下latent与动作坐标的局部控制对应，不能单独证明广义空间感知或任务理解。','',
+                  '`interventions.npz`保存全部状态、专家动作、z0、每次扰动的z/动作、两种Δa、raw诊断和Jacobian；主样本目录另含逐项CSV。',
+                  '复现：','```bash',f'.venv/bin/python scripts/dsrlna/analyze_demo_latents.py --latent-coordinate-experiment --steps {step} --perturb-demo-id {args.perturb_demo_id} --perturb-timestep {args.perturb_timestep} --perturb-num-states {args.perturb_num_states} --batch-size {args.batch_size} --platform {args.platform}','```','']
+        (out/'REPORT.md').write_text('\n'.join(lines))
+        print(f'Latent coordinate intervention results: {out}',flush=True)
+
+
+def analyze_jacobian_minus_identity(source_dir):
+    """Postprocess saved Jacobians only; never invert or decode new samples.
+
+    The pre-final-clip J-I diagnoses the integrated flow residual derivative.
+    The actual clipped decoder's J-I also contains clipping effects. Removing
+    the diagonal/time-diagonal separates coupling from the cancelling -I term.
+    """
+    import csv
+    import numpy as np
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    source_dir=Path(source_dir).resolve()
+    source=json.loads((source_dir/'summary.json').read_text())
+    input_file=source_dir/'interventions.npz'
+    with np.load(input_file) as data:
+        clipped=data['jacobian_clipped'].astype(np.float64)
+        preclip=data['jacobian_preclip'].astype(np.float64)
+        demo_ids=data['demo_id'];timesteps=data['timestep']
+    if clipped.shape!=preclip.shape or clipped.ndim!=3 or clipped.shape[1]!=clipped.shape[2]:
+        raise ValueError('Expected matching [states, action_dim, latent_dim] square Jacobians')
+    if not np.isfinite(clipped).all() or not np.isfinite(preclip).all():
+        raise ValueError('Nonfinite source Jacobian')
+    B,D,_=clipped.shape;horizon=source['horizon'];C=source['action_dim']
+    if D!=horizon*C or C!=7:
+        raise ValueError('Expected four-step Square coordinate layout')
+    out=source_dir/'jacobian_minus_identity';out.mkdir(exist_ok=True)
+    identity=np.eye(D,dtype=np.float64);identity_norm=float(np.sqrt(D))
+    diagonal=np.eye(D,dtype=bool)
+    same_component=np.equal.outer(np.arange(D)%C,np.arange(D)%C)
+    same_time=np.equal.outer(np.arange(D)//C,np.arange(D)//C)
+    off_time=~same_time;off_diagonal=~diagonal
+    names=('x','y','z','rx','ry','rz','g')
+    labels=[f'{h}:{name}' for h in range(horizon) for name in names]
+    records=[];saved=dict(identity=identity,off_time_mask=off_time,off_diagonal_mask=off_diagonal,
+                          same_component_mask=same_component,demo_id=demo_ids,timestep=timesteps)
+
+    def energy_fraction(matrix,mask):
+        energy=matrix*matrix
+        return float(energy[mask].sum()/max(float(energy.sum()),1e-30))
+
+    for variant,jacobians in (('clipped',clipped),('preclip',preclip)):
+        residual=jacobians-identity[None]
+        offdiag=residual*off_diagonal[None]
+        cross=residual*off_time[None]
+        saved.update({f'{variant}_J':jacobians,f'{variant}_J_minus_I':residual,
+                      f'{variant}_off_diagonal':offdiag,f'{variant}_cross_time':cross})
+        # Off-diagonal entries cannot be created by subtracting I.
+        np.testing.assert_array_equal(residual[:,off_diagonal],jacobians[:,off_diagonal])
+        np.testing.assert_array_equal(cross[:,off_time],jacobians[:,off_time])
+        np.testing.assert_allclose(residual+identity[None],jacobians,rtol=1e-12,atol=2e-16)
+        for b in range(B):
+            J=jacobians[b];L=residual[b];O=offdiag[b];T=cross[b]
+            j_norm=float(np.linalg.norm(J));l_norm=float(np.linalg.norm(L));cross_norm=float(np.linalg.norm(T))
+            # Frobenius expansion explicitly exposes cancellation with I.
+            cross_term=float(2*np.sum(identity*L))
+            np.testing.assert_allclose(j_norm*j_norm,D+l_norm*l_norm+cross_term,atol=2e-13,rtol=1e-12)
+            record=dict(variant=variant,demo_id=int(demo_ids[b]),timestep=int(timesteps[b]),primary=(b==0),
+                        J_frobenius=j_norm,J_minus_I_frobenius=l_norm,identity_frobenius=identity_norm,
+                        J_norm_over_I=j_norm/identity_norm,residual_norm_over_I=l_norm/identity_norm,
+                        mean_J_diagonal=float(np.trace(J)/D),
+                        residual_cosine_with_I=float(np.sum(identity*L)/max(identity_norm*l_norm,1e-30)),
+                        J_same_component_energy_fraction=energy_fraction(J,same_component),
+                        residual_same_component_energy_fraction=energy_fraction(L,same_component),
+                        residual_diagonal_energy_fraction=energy_fraction(L,diagonal),
+                        residual_cross_time_energy_fraction=energy_fraction(L,off_time),
+                        off_diagonal_same_component_energy_fraction=energy_fraction(O,same_component),
+                        off_diagonal_cross_time_energy_fraction=energy_fraction(O,off_time),
+                        cross_time_frobenius=cross_norm,cross_time_norm_over_I=cross_norm/identity_norm,
+                        cross_time_same_component_energy_fraction=energy_fraction(T,same_component),
+                        cross_time_fraction_of_J_energy=energy_fraction(J,off_time),
+                        identity_cross_term=cross_term)
+            records.append(record)
+    np.savez_compressed(out/'matrices.npz',**saved)
+    with (out/'state_metrics.csv').open('w') as f:
+        writer=csv.DictWriter(f,fieldnames=list(records[0]));writer.writeheader();writer.writerows(records)
+    with (out/'component_temporal_blocks.csv').open('w') as f:
+        writer=csv.writer(f);writer.writerow(['variant','demo_id','timestep','component','output_time','input_time','J','J_minus_I','cross_time_entry'])
+        for variant in ('clipped','preclip'):
+            for b in range(B):
+                for c,name in enumerate(names):
+                    for h_out in range(horizon):
+                        for h_in in range(horizon):
+                            r=h_out*C+c;k=h_in*C+c
+                            writer.writerow([variant,int(demo_ids[b]),int(timesteps[b]),name,h_out,h_in,
+                                             float(saved[f'{variant}_J'][b,r,k]),float(saved[f'{variant}_J_minus_I'][b,r,k]),h_out!=h_in])
+    # Display J and its residual on their own signed scales; -I otherwise hides coupling.
+    fig,axes=plt.subplots(2,3,figsize=(19,13))
+    for row,variant in enumerate(('clipped','preclip')):
+        for col,(suffix,title) in enumerate((('J','J'),('J_minus_I','J - I'),('off_diagonal','J - I with coordinate diagonal masked'))):
+            matrix=saved[f'{variant}_{suffix}'][0]
+            limit=max(float(np.max(np.abs(matrix))),1e-10)
+            im=axes[row,col].imshow(matrix,cmap='RdBu_r',vmin=-limit,vmax=limit,aspect='auto')
+            axes[row,col].set(title=f'{variant}: {title}',xlabel='Latent column',ylabel='Action row',
+                              xticks=np.arange(0,D,C),xticklabels=np.arange(0,D,C),
+                              yticks=np.arange(0,D,C),yticklabels=[labels[i] for i in range(0,D,C)])
+            for line in np.arange(C-.5,D,C):axes[row,col].axvline(line,color='black',linewidth=.5);axes[row,col].axhline(line,color='black',linewidth=.5)
+            fig.colorbar(im,ax=axes[row,col],shrink=.8)
+    fig.suptitle(f'Primary demo_{demo_ids[0]}, t={timesteps[0]}; each panel has its OWN color scale')
+    fig.tight_layout();fig.savefig(out/'J_minus_I_primary.png',dpi=180);fig.savefig(out/'J_minus_I_primary.pdf');plt.close(fig)
+    for variant in ('preclip','clipped'):
+        fig,axes=plt.subplots(2,4,figsize=(16,8))
+        primary=saved[f'{variant}_J_minus_I'][0]
+        common=max(float(np.max(np.abs(primary*off_time))),1e-10)
+        cmap=plt.get_cmap('RdBu_r').copy();cmap.set_bad('#eeeeee')
+        for c,ax in enumerate(axes.flat):
+            if c==7:
+                ax.axis('off');ax.text(.05,.85,'Gray diagonal is excluded.\nOff-time entries satisfy (J-I)[h,k] = J[h,k].\nRows: output action time.\nColumns: latent time.\nAll panels share the SAME color scale.\nWeak blocks should be read using annotations.',va='top',fontsize=11);continue
+            index=np.arange(horizon)*C+c
+            block=primary[np.ix_(index,index)]
+            shown=np.ma.array(block,mask=np.eye(horizon,dtype=bool))
+            im=ax.imshow(shown,cmap=cmap,vmin=-common,vmax=common)
+            ax.set(title=f'{names[c]} -> {names[c]}',xticks=range(horizon),yticks=range(horizon),xlabel='Input latent time',ylabel='Output action time')
+            for h_out in range(horizon):
+                for h_in in range(horizon):
+                    if h_out==h_in:ax.text(h_in,h_out,'--',ha='center',va='center',color='gray')
+                    else:ax.text(h_in,h_out,f'{block[h_out,h_in]:+.2g}',ha='center',va='center',fontsize=8)
+        fig.suptitle(f'Primary {variant} flow: cross-time 4x4 blocks of J-I; identity has ZERO entries here')
+        fig.tight_layout();fig.savefig(out/f'cross_time_blocks_{variant}.png',dpi=180);fig.savefig(out/f'cross_time_blocks_{variant}.pdf');plt.close(fig)
+    pre=[r for r in records if r['variant']=='preclip']
+    fig,axes=plt.subplots(1,3,figsize=(18,5))
+    xx=np.arange(B);state_labels=[f'{int(d)}:{int(t)}' for d,t in zip(demo_ids,timesteps)]
+    axes[0].bar(xx-.18,[r['J_norm_over_I'] for r in pre],width=.36,label='||J|| / ||I||')
+    axes[0].bar(xx+.18,[r['residual_norm_over_I'] for r in pre],width=.36,label='||J-I|| / ||I||')
+    axes[0].set(title='Preclip norms: cancellation is possible',xticks=xx,xticklabels=state_labels,ylabel='Frobenius norm ratio');axes[0].tick_params(axis='x',rotation=45);axes[0].legend(fontsize=8)
+    for offset,key,label in ((-.24,'J_same_component_energy_fraction','J'),(0,'residual_same_component_energy_fraction','J-I'),(.24,'off_diagonal_same_component_energy_fraction','offdiag(J-I)')):
+        axes[1].bar(xx+offset,[r[key] for r in pre],width=.24,label=label)
+    axes[1].set(title='Same-component energy: inspect the diagonal bias',xticks=xx,xticklabels=state_labels,ylim=(0,1.05));axes[1].tick_params(axis='x',rotation=45);axes[1].legend(fontsize=8)
+    cross=saved['preclip_cross_time']
+    component_energy=np.mean((cross.reshape(B,horizon,C,horizon,C)**2).sum(axis=(1,3)),axis=0)
+    component_fraction=component_energy/np.maximum(component_energy.sum(0,keepdims=True),1e-30)
+    im=axes[2].imshow(component_fraction,cmap='Blues',vmin=0,vmax=1)
+    axes[2].set(title='ONLY cross-time energy; pooled over states',xticks=range(C),xticklabels=names,yticks=range(C),yticklabels=names,xlabel='Latent component group',ylabel='Action component')
+    for r in range(C):
+        for c in range(C):axes[2].text(c,r,f'{component_fraction[r,c]:.0%}',ha='center',va='center',fontsize=8,color='white' if component_fraction[r,c]>.6 else 'black')
+    fig.colorbar(im,ax=axes[2],shrink=.8)
+    fig.tight_layout();fig.savefig(out/'structure_summary.png',dpi=180);plt.close(fig)
+    summary=dict(source_directory=str(source_dir),source_checkpoint=source['checkpoint'],source_dataset=source['dataset'],
+                 inverse_method=source['inverse_method'],reverse_query_times=source['reverse_query_times'],
+                 num_states=B,dimension=D,identity_frobenius=identity_norm,primary_variant_for_flow_interpretation='preclip',
+                 definitions=dict(residual='L=J-I',norm_ratio='||J-I||_F/||I||_F, not an additive contribution percentage',
+                                  component_correspondence='sum of squared entries with output_index%7=input_index%7 / total squared entries',
+                                  off_diagonal='coordinate diagonal removed from J-I',cross_time='only entries with output_index//7 != input_index//7',
+                                  clipping='clipped J-I includes clipping; preclip J-I is the integrated flow residual derivative'),
+                 states=records,pooled_preclip_cross_time_component_energy=component_energy.tolist(),
+                 pooled_preclip_cross_time_component_fraction=component_fraction.tolist())
+    (out/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
+    primary=pre[0]
+    lines=['# 补充：J-I与跨时间耦合诊断','',
+           '**仅对已有8个状态的Jacobian做矩阵后处理；没有重复反解、扰动、decoder推理或训练。**','',
+           '定义L=J−I，I为28×28恒等矩阵，||I||F=√28。以裁剪前J为Flow学习残差的主要诊断；实际动作的裁剪版并列保存。','',
+           '## 主样本demo_226,t=70','',
+           '| 指标 | 裁剪前Flow | 实际裁剪动作 |','|---|---:|---:|']
+    clipped_primary=records[0]
+    fields=[('||J||F / ||I||F','J_norm_over_I'),('||J-I||F / ||I||F','residual_norm_over_I'),
+            ('J同分量能量比例','J_same_component_energy_fraction'),('J-I同分量能量比例','residual_same_component_energy_fraction'),
+            ('J-I精确对角能量比例','residual_diagonal_energy_fraction'),('去对角后的同分量能量比例','off_diagonal_same_component_energy_fraction'),
+            ('跨时间项的同分量能量比例','cross_time_same_component_energy_fraction'),('跨时间项能量占J总能量','cross_time_fraction_of_J_energy'),
+            ('跨时间项范数 / ||I||F','cross_time_norm_over_I'),('J-I与I的余弦相似度','residual_cosine_with_I')]
+    for label,key in fields:lines.append(f'| {label} | {primary[key]:.6f} | {clipped_primary[key]:.6f} |')
+    lines += ['', '## 如何解释','',
+              '||J-I||/||I||不是“学习贡献占百分之几”。J=I+(J-I)中两部分可以强烈抵消；这里应同时读||J||、残差与I的方向及交叉项。',
+              'J-I的大负对角表示局部抵消恒等通路。减掉I本身也会增强同分量对角，因此J-I总体分量对应率很高，不能单独作为学习到语义结构的证据。',
+              '更关键的是去除对角后的部分，尤其跨动作时间步项：恒等矩阵这些位置均为0，所以其数值与J中的对应项逐元素相同，不能由减I凭空产生。',
+              '实际裁剪版中，饱和输出的J行可以为0，减I会在相应对角产生-1。这部分不能全部归于速度网络学习；裁剪前版本避免该混淆。',
+              '这些指标描述局部映射的非恒等导数及耦合，不能证明环境空间语义理解；也不是把每个Euler步的贡献单独分解。','',
+              '## 各状态裁剪前结果','',
+              '| demo | t | ||J-I||/||I|| | J-I同分量率 | 去对角同分量率 | 跨时间同分量率 | 跨时间能量/J能量 |','|---|---:|---:|---:|---:|---:|---:|']
+    for r in pre:lines.append(f'| {r["demo_id"]} | {r["timestep"]} | {r["residual_norm_over_I"]:.4f} | {r["residual_same_component_energy_fraction"]:.1%} | {r["off_diagonal_same_component_energy_fraction"]:.1%} | {r["cross_time_same_component_energy_fraction"]:.1%} | {r["cross_time_fraction_of_J_energy"]:.1%} |')
+    lines += ['', '## 图与数据','',
+              '[J、J-I、去对角残差对照](J_minus_I_primary.png)；[裁剪前4×4跨时间块](cross_time_blocks_preclip.png)；[实际动作4×4块](cross_time_blocks_clipped.png)；[8状态汇总](structure_summary.png)。',
+              '4×4图中行表示输出动作时间，列表示latent的时间位置；灰色对角被掩去，只看跨时间项；七个分量共用同一色标，弱分量请结合标注数值。',
+              '输入组名x/y/z/rx/ry/rz/g只是按索引%7对齐的标签；旋转是轴角增量。',
+              '`matrices.npz`保存原J、I、J-I、去对角/跨时间矩阵与掩码；`state_metrics.csv`保存16组状态指标；`component_temporal_blocks.csv`逐个保存全部4×4块数值。','',
+              '复现：','```bash',f'.venv/bin/python scripts/dsrlna/analyze_demo_latents.py --jacobian-minus-identity-from {source_dir}','```','']
+    (out/'REPORT.md').write_text('\n'.join(lines))
+    print('Primary preclip metrics: '+json.dumps(primary),flush=True)
+    print(f'J-I postprocessing results: {out}',flush=True)
+    return out
+
+
+def analyze_latent_action_distances(args, run, config, paths):
+    """Experiment 3: within-state distances around freshly inverted demo chunks.
+
+    Uniformly select valid state rows without filtering reconstruction errors.
+    Shared random sphere directions isolate radial and cross-state effects.
+    All action distances reference D(s,z0), never the expert action. Designed
+    radius ties are preserved for the primary Spearman; measured-dz Spearman
+    is also saved to expose floating-point tie breaking.
+    """
+    import csv
+    import h5py
+    import numpy as np
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from scipy.stats import spearmanr
+
+    def file_digest(path):
+        h=hashlib.sha256()
+        with Path(path).open('rb') as f:
+            for block in iter(lambda:f.read(8*1024*1024),b''):h.update(block)
+        return h.hexdigest()
+
+    def corr(x,y):
+        if np.ptp(y)==0:return None
+        value=float(spearmanr(np.asarray(x).reshape(-1),np.asarray(y).reshape(-1)).statistic)
+        return value if np.isfinite(value) else None
+
+    def distribution(values,prefix):
+        values=np.asarray(values,dtype=np.float64).reshape(-1)
+        d={prefix+'_mean':float(values.mean()),prefix+'_std':float(values.std(ddof=1)) if len(values)>1 else 0.,
+           prefix+'_min':float(values.min()),prefix+'_max':float(values.max())}
+        for q in (.05,.25,.5,.75,.95):d[f'{prefix}_q{int(q*100):02d}']=float(np.quantile(values,q))
+        d[prefix+'_cv']=d[prefix+'_std']/d[prefix+'_mean'] if d[prefix+'_mean']>0 else None
+        d[prefix+'_q95_over_q05']=d[prefix+'_q95']/d[prefix+'_q05'] if d[prefix+'_q05']>0 else None
+        d[prefix+'_max_over_min']=d[prefix+'_max']/d[prefix+'_min'] if d[prefix+'_min']>0 else None
+        return d
+
+    def write_csv(path,records):
+        with Path(path).open('w') as f:
+            writer=csv.DictWriter(f,fieldnames=list(records[0]));writer.writeheader();writer.writerows(records)
+
+    horizon=config['horizon_length'] if config['action_chunking'] else 1
+    data,total=load_demos(args.dataset,horizon,0,args.seed)
+    B=args.distance_num_states;M=args.distance_num_directions
+    if B>total:raise ValueError('Requested more states than available full windows')
+    rng=np.random.default_rng(args.seed)
+    rows=np.sort(rng.choice(total,B,replace=False))
+    states=data['observations'][rows];expert=data['action_chunks'][rows];D=expert.shape[1]
+    radii=np.asarray(sorted(set(args.distance_radii)),dtype=np.float32);R=len(radii)
+    directions=rng.normal(size=(M,D));directions=(directions/np.linalg.norm(directions,axis=1,keepdims=True)).astype(np.float32)
+    nominal=np.broadcast_to(radii[None,:,None],(B,R,M))
+    dataset_sha=file_digest(args.dataset)
+    with h5py.File(args.dataset,'r') as f:num_demos=len(f['data'])
+    invert,_,decode,decode_raw=make_functions(config,D,args,return_decoder=True)
+    print(f'Distance experiment: {B} random states from {num_demos} demos; {M} directions x {R} radii = {M*R} points/state; radii={radii.tolist()}',flush=True)
+    for path in (paths if args.steps else paths[-1:]):
+        step=int(path.stem.split('_')[-1])
+        out=args.output/run.name/FLOW_INVERSE_OUTPUT_DIR/f'latent_action_distance_step_{step}_seed_{args.seed}'
+        out.mkdir(parents=True,exist_ok=True)
+        checkpoint_sha=file_digest(path)
+        with path.open('rb') as f:payload=pickle.load(f)
+        params=payload['agent']['bc_flow_network']['params']['modules_actor_bc_flow'];del payload
+        z0,base,error=[np.asarray(v) for v in invert(params,states,expert)]
+        raw_base=np.asarray(decode_raw(params,states,z0))
+        np.testing.assert_allclose(base,np.clip(raw_base,-1,1),atol=3e-6,rtol=2e-5)
+        perturbed_z=z0[:,None,None,:]+radii[None,:,None,None]*directions[None,None,:,:]
+        batch_states=np.broadcast_to(states[:,None,None,:],(B,R,M,states.shape[1])).reshape(-1,states.shape[1])
+        flat_z=perturbed_z.reshape(-1,D);pieces=[]
+        for start in range(0,len(flat_z),args.batch_size):
+            end=min(start+args.batch_size,len(flat_z));pad=args.batch_size-(end-start)
+            ss=np.pad(batch_states[start:end],((0,pad),(0,0)),mode='edge')
+            zz=np.pad(flat_z[start:end],((0,pad),(0,0)),mode='edge')
+            pieces.append(np.asarray(decode_raw(params,ss,zz))[:end-start])
+            if start==0 or end==len(flat_z) or (start//args.batch_size)%10==0:print(f'Decoded {end}/{len(flat_z)} perturbations',flush=True)
+        raw_actions=np.concatenate(pieces).reshape(B,R,M,D)
+        if not np.isfinite(raw_actions).all():raise ValueError('Nonfinite preclip decoder outputs')
+        actions=np.clip(raw_actions,-1,1)
+        dz=np.linalg.norm(perturbed_z.astype(np.float64)-z0[:,None,None,:].astype(np.float64),axis=-1)
+        da=np.linalg.norm(actions.astype(np.float64)-base[:,None,None,:].astype(np.float64),axis=-1)
+        da_raw=np.linalg.norm(raw_actions.astype(np.float64)-raw_base[:,None,None,:].astype(np.float64),axis=-1)
+        gain=da/dz;gain_raw=da_raw/dz
+        clipped_fraction=np.mean(np.abs(raw_actions)>=1,axis=-1)
+        dz_error=float(np.max(np.abs(dz-nominal)))
+        np.testing.assert_allclose(dz,nominal,rtol=5e-6,atol=5e-7)
+        np.savez_compressed(out/'distance_samples.npz',source_rows=rows,demo_id=data['demo_id'][rows],timestep=data['timestep'][rows],
+                            states=states,expert_actions=expert,z0=z0,baseline_actions=base,raw_baseline_actions=raw_base,
+                            radii=radii,directions=directions,perturbed_z=perturbed_z,perturbed_actions=actions,raw_perturbed_actions=raw_actions,
+                            latent_distances=dz,action_distances=da,preclip_action_distances=da_raw,gain=gain,preclip_gain=gain_raw,
+                            clipped_coordinate_fraction=clipped_fraction,reconstruction_max_abs=error)
+        radius_records=[];state_radius_records=[];state_records=[]
+        reference_radius=int(np.argmin(np.abs(radii-1.)))
+        tol=1e-6
+        monotone=np.diff(da,axis=1)>=-tol
+        monotone_raw=np.diff(da_raw,axis=1)>=-tol
+        for r,radius in enumerate(radii):
+            rec=dict(radius=float(radius),num_states=B,num_directions_per_state=M,n=B*M,
+                     median_radius_over_z0_norm=float(np.median(radius/np.linalg.norm(z0.astype(np.float64),axis=1))),
+                     perturbation_rms_per_coordinate=float(radius/np.sqrt(D)),
+                     mean_clipped_coordinate_fraction=float(clipped_fraction[:,r].mean()),zero_action_response_count=int((da[:,r]<=1e-8).sum()))
+            rec.update(distribution(da[:,r],'action_distance'));rec.update(distribution(gain[:,r],'gain'))
+            rec.update(distribution(da_raw[:,r],'preclip_action_distance'));rec.update(distribution(gain_raw[:,r],'preclip_gain'))
+            per_state_medians=np.median(gain[:,r],axis=1)
+            rec.update(distribution(per_state_medians,'state_median_gain'))
+            radius_records.append(rec)
+        for b,row in enumerate(rows):
+            rec=dict(state_index=b,demo_id=int(data['demo_id'][row]),timestep=int(data['timestep'][row]),source_row=int(row),
+                     z0_norm=float(np.linalg.norm(z0[b].astype(np.float64))),reconstruction_max_abs=float(error[b]),
+                     baseline_clipped_fraction=float(np.mean(np.abs(raw_base[b])>=1)),
+                     spearman_radius_ties=corr(nominal[b],da[b]),spearman_measured_dz=corr(dz[b],da[b]),
+                     spearman_preclip=corr(nominal[b],da_raw[b]),
+                     adjacent_radius_nondecreasing_fraction=float(monotone[b].mean()),
+                     all_radii_nondecreasing_direction_fraction=float(monotone[b].all(axis=0).mean()),
+                     adjacent_radius_preclip_nondecreasing_fraction=float(monotone_raw[b].mean()),
+                     reference_radius=float(radii[reference_radius]))
+            rec.update(distribution(gain[b,reference_radius],'reference_radius_gain'))
+            state_records.append(rec)
+            for r,radius in enumerate(radii):
+                rr=dict(state_index=b,demo_id=rec['demo_id'],timestep=rec['timestep'],radius=float(radius),n_directions=M,
+                        mean_clipped_coordinate_fraction=float(clipped_fraction[b,r].mean()),zero_action_response_count=int((da[b,r]<=1e-8).sum()))
+                rr.update(distribution(da[b,r],'action_distance'));rr.update(distribution(gain[b,r],'gain'))
+                rr.update(distribution(da_raw[b,r],'preclip_action_distance'));rr.update(distribution(gain_raw[b,r],'preclip_gain'))
+                state_radius_records.append(rr)
+        write_csv(out/'radius_statistics.csv',radius_records)
+        write_csv(out/'state_statistics.csv',state_records)
+        write_csv(out/'state_radius_statistics.csv',state_radius_records)
+        with (out/'samples_long.csv').open('w') as f:
+            writer=csv.writer(f);writer.writerow(['state_index','demo_id','timestep','direction_id','radius','measured_latent_distance','action_distance','gain','preclip_action_distance','preclip_gain','clipped_coordinate_fraction'])
+            for b in range(B):
+                for r in range(R):
+                    for d in range(M):writer.writerow([b,state_records[b]['demo_id'],state_records[b]['timestep'],d,float(radii[r]),float(dz[b,r,d]),float(da[b,r,d]),float(gain[b,r,d]),float(da_raw[b,r,d]),float(gain_raw[b,r,d]),float(clipped_fraction[b,r,d])])
+        valid_rhos=np.asarray([r['spearman_radius_ties'] for r in state_records if r['spearman_radius_ties'] is not None])
+        if not len(valid_rhos):raise ValueError('All states have constant action-distance response')
+        summary=dict(checkpoint=str(path),checkpoint_sha256=checkpoint_sha,dataset=str(args.dataset.resolve()),dataset_sha256=dataset_sha,
+                     seed=args.seed,inverse_method=FLOW_INVERSE_METHOD,reverse_query_times=list(inverse_time_grid(config['flow_steps'])),
+                     num_dataset_demos=num_demos,num_states=B,num_distinct_sampled_demos=int(len(np.unique(data['demo_id'][rows]))),
+                     num_unique_random_directions=M,num_radii=R,num_perturbations_per_state=R*M,total_perturbations=B*R*M,
+                     direction_design='Shared Gaussian-normalized sphere directions, reused across all radii AND states; no direction resampling',
+                     state_sampling='Uniform without replacement over ALL valid full windows; no reconstruction-error filtering',
+                     action_distance_reference='D(s,z0), not expert action',latent_dimension=D,horizon=horizon,radii=radii.tolist(),
+                     spearman_primary='Designed radius with exact ties; measured dz correlation also stored to expose float32 tie breaking',
+                     max_measured_radius_error=dz_error,pooled_spearman_radius_ties=corr(nominal,da),pooled_spearman_measured_dz=corr(dz,da),
+                     pooled_preclip_spearman=corr(nominal,da_raw),valid_spearman_state_count=len(valid_rhos),
+                     per_state_spearman_summary=distribution(valid_rhos,'rho'),
+                     fraction_states_rho_ge_09=float(np.mean(valid_rhos>=.9)),fraction_states_rho_ge_08=float(np.mean(valid_rhos>=.8)),
+                     adjacent_radius_nondecreasing_fraction=float(monotone.mean()),
+                     all_radii_nondecreasing_direction_fraction=float(monotone.all(axis=1).mean()),
+                     z0_norm_summary=distribution(np.linalg.norm(z0.astype(np.float64),axis=1),'norm'),
+                     perturbed_z_norm_summary=distribution(np.linalg.norm(perturbed_z.astype(np.float64),axis=-1),'norm'),
+                     reconstruction_summary=distribution(error,'error'),radius_statistics=radius_records,states=state_records)
+        canonical=args.output/run.name/f'all_demo_inverse_step_{step}_time_shift_1'
+        if (canonical/'summary.json').exists():
+            cm=json.loads((canonical/'summary.json').read_text())
+            if cm['checkpoint_sha256']==checkpoint_sha and cm['dataset_sha256']==dataset_sha:
+                with np.load(canonical/'all_latents.npz') as cache:
+                    np.testing.assert_array_equal(cache['demo_id'][rows],data['demo_id'][rows])
+                    np.testing.assert_array_equal(cache['timestep'][rows],data['timestep'][rows])
+                    np.testing.assert_allclose(z0,cache['z_demo'][rows],rtol=2e-5,atol=3e-5)
+                    summary['max_inverse_difference_to_validated_all_demo_cache']=float(np.max(np.abs(z0-cache['z_demo'][rows])))
+                    summary['full_dataset_z0_norm_median']=float(np.median(np.linalg.norm(cache['z_demo'].astype(np.float64),axis=1)))
+                    summary['full_dataset_z0_norm_max']=float(np.linalg.norm(cache['z_demo'].astype(np.float64),axis=1).max())
+        (out/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
+        # Six panels retain state-wise and direction-wise distributions rather than only pooled rho.
+        fig,axes=plt.subplots(2,3,figsize=(18,10))
+        colors=plt.get_cmap('viridis')(np.linspace(.1,.9,R))
+        for r,radius in enumerate(radii):
+            axes[0,0].scatter(dz[:,r].reshape(-1),da[:,r].reshape(-1),s=4,alpha=.2,color=colors[r],label=f'r={radius:g}')
+        axes[0,0].set(xlabel='Measured ||z-z0||',ylabel='||D(s,z)-D(s,z0)||',title=f'All {B*R*M:,} interventions; pooled rho={summary["pooled_spearman_radius_ties"]:.3f}')
+        axes[0,0].legend(fontsize=8)
+        for ax,values,title,ylabel in ((axes[0,1],da,'Action-distance distributions','Action distance'),(axes[0,2],gain,'Directional gain distributions','Action distance / latent distance')):
+            parts=ax.violinplot([values[:,r].reshape(-1) for r in range(R)],positions=np.arange(R),showmedians=True,showextrema=False)
+            for body,color in zip(parts['bodies'],colors):body.set_facecolor(color);body.set_alpha(.65)
+            for r in range(R):
+                q=np.quantile(values[:,r],[.05,.5,.95]);ax.plot([r,r],[q[0],q[2]],color='black',linewidth=1);ax.scatter(r,q[1],s=15,color='black')
+            ax.set(xticks=np.arange(R),xticklabels=[f'{v:g}' for v in radii],xlabel='Radius',ylabel=ylabel,title=title)
+        axes[1,0].hist(valid_rhos,bins=20,color='#2675b6',alpha=.8)
+        axes[1,0].axvline(np.median(valid_rhos),color='orange',label=f'median={np.median(valid_rhos):.3f}')
+        axes[1,0].set(xlabel='Per-state Spearman (radius ties preserved)',ylabel='States',title='Do distance ranks transfer across states?');axes[1,0].legend(fontsize=8)
+        med=np.median(gain[:,reference_radius],axis=1);low,high=np.quantile(gain[:,reference_radius],[.1,.9],axis=1)
+        order=np.argsort(med)
+        axes[1,1].errorbar(np.arange(B),med[order],yerr=[med[order]-low[order],high[order]-med[order]],fmt='.',markersize=3,elinewidth=.5,alpha=.8)
+        axes[1,1].set(xlabel='States sorted by median gain',ylabel='Gain (median and q10/q90 across directions)',title=f'SAME directions, radius={radii[reference_radius]:g}')
+        for b in range(B):axes[1,2].plot(radii,np.median(da[b],axis=1),color='gray',alpha=.15,linewidth=.6)
+        axes[1,2].plot(radii,np.median(da,axis=(0,2)),color='orange',marker='o',label='Pooled median')
+        axes[1,2].set(xlabel='Radius',ylabel='Median action distance',title='One curve per fixed state');axes[1,2].legend(fontsize=8)
+        for ax in axes.flat:ax.grid(alpha=.2)
+        fig.suptitle(f'Square fixed-state latent/action distances | {B} states x {M} directions x {R} radii | original clipped decoder')
+        fig.tight_layout();fig.savefig(out/'distance_overview.png',dpi=180);fig.savefig(out/'distance_overview.pdf');plt.close(fig)
+        # Automatically choose worst/median/best rank relation and strongest sampled anisotropy.
+        rho_order=sorted(range(B),key=lambda b:state_records[b]['spearman_radius_ties'] if state_records[b]['spearman_radius_ties'] is not None else -2)
+        spread=[r['reference_radius_gain_q95_over_q05'] if r['reference_radius_gain_q95_over_q05'] is not None else np.inf for r in state_records]
+        examples=[rho_order[0],rho_order[len(rho_order)//2],rho_order[-1],int(np.argmax(spread))]
+        fig,axes=plt.subplots(2,2,figsize=(13,10))
+        for ax,b,title in zip(axes.flat,examples,('Lowest state rho','Median state rho','Highest state rho','Largest sampled directional spread')):
+            for r,radius in enumerate(radii):ax.scatter(dz[b,r],da[b,r],s=20,alpha=.7,color=colors[r],label=f'r={radius:g}')
+            rec=state_records[b]
+            ax.set(title=f'{title}: demo_{rec["demo_id"]}, t={rec["timestep"]}\nrho={rec["spearman_radius_ties"]}, gain q95/q05 at r={radii[reference_radius]:g}: {rec["reference_radius_gain_q95_over_q05"]:.2f}',xlabel='Latent distance',ylabel='Action distance')
+            ax.legend(fontsize=8);ax.grid(alpha=.2)
+        fig.tight_layout();fig.savefig(out/'state_examples.png',dpi=180);plt.close(fig)
+        # Paired rays make radial monotonicity observable independently of direction changes.
+        b=examples[3];fig,axes=plt.subplots(1,2,figsize=(13,5))
+        for d in range(M):
+            axes[0].plot(radii,da[b,:,d],'-o',markersize=3,alpha=.6)
+            axes[1].plot(radii,gain[b,:,d],'-o',markersize=3,alpha=.6)
+        axes[0].set(xlabel='Radius',ylabel='Action distance',title='Same random direction along each curve')
+        axes[1].set(xlabel='Radius',ylabel='da/dz',title='Gain can differ across directions and radii')
+        for ax in axes:ax.grid(alpha=.2)
+        fig.suptitle(f'Automatically selected anisotropic state: demo_{state_records[b]["demo_id"]}, t={state_records[b]["timestep"]}')
+        fig.tight_layout();fig.savefig(out/'direction_rays.png',dpi=180);plt.close(fig)
+        lines=['# 实验三：固定状态的Latent–Action距离关系','',
+               f'Checkpoint：`{path}`；Square数据集：`{args.dataset}`。',
+               f'从全部有效完整动作窗口中均匀无放回抽取{B}个状态，涉及{summary["num_distinct_sampled_demos"]}条demo；不按反解误差筛选。',
+               f'每个状态先用最新反解t=0.9,…,0得到z0；{M}个随机单位方向×{R}个半径，共{M*R}个扰动点/状态、总{B*M*R:,}个点。',
+               '同一组随机方向在所有半径和状态间复用，以分离半径和状态的影响；不是100个独立方向。冻结Flow，无z裁剪/tanh/优化；动作保持原decoder最终[-1,1]裁剪。',
+               '**动作距离始终参考a_base=D(s,z0)，绝不参考专家动作。** 专家动作仅用于反解及重建诊断。',
+               '主Spearman使用设计半径的并列秩；实际dz只因float32舍入偏离设计半径，最大偏差见summary。也保存直接使用测得dz的Spearman作敏感性对照。不提供把配对方向当独立样本的p值。','',
+               '## 相关性与跨状态稳定性','',
+               f'总体描述性Spearman={summary["pooled_spearman_radius_ties"]:.4f}。逐状态rho中位数={np.median(valid_rhos):.4f}，q05={np.quantile(valid_rhos,.05):.4f}，q95={np.quantile(valid_rhos,.95):.4f}，min={valid_rhos.min():.4f}，max={valid_rhos.max():.4f}。',
+               f'逐状态rho≥0.9的比例={summary["fraction_states_rho_ge_09"]:.1%}，rho≥0.8的比例={summary["fraction_states_rho_ge_08"]:.1%}。有效rho状态数={len(valid_rhos)}。',
+               f'沿同一方向逐级增大半径时，非减的相邻比较比例={summary["adjacent_radius_nondecreasing_fraction"]:.1%}；全部半径均非减的方向比例={summary["all_radii_nondecreasing_direction_fraction"]:.1%}。','',
+               '## 各半径动作距离与增益分布','',
+               '| r | da均值±标准差 | da q05/q50/q95 | gain q05/q50/q95 | gain q95/q05 | r/||z0||中位数 |','|---:|---|---|---|---:|---:|']
+        for r in radius_records:lines.append(f'| {r["radius"]:g} | {r["action_distance_mean"]:.4f} ± {r["action_distance_std"]:.4f} | {r["action_distance_q05"]:.4f}/{r["action_distance_q50"]:.4f}/{r["action_distance_q95"]:.4f} | {r["gain_q05"]:.4f}/{r["gain_q50"]:.4f}/{r["gain_q95"]:.4f} | {r["gain_q95_over_q05"]:.2f} | {r["median_radius_over_z0_norm"]:.3f} |')
+        lines += ['', '表中每个半径合并不同状态和方向；判断纯方向差异应读state_radius_statistics.csv，而不能只读合并分布。',
+                  'state_radius_statistics.csv对每个状态/半径分别给出均值、样本标准差、q05/q25/q50/q75/q95、CV、q95/q05和max/min，包含da和gain，以及裁剪前对照。',
+                  'state_statistics.csv记录每个状态的rho、配对方向单调性及参考半径的gain分布；radius_statistics.csv还记录不同状态的中位gain分布。',
+                  '半径大小结合z0模长、r/||z0||和每坐标RMS=r/√28一起解释。r=2不是微小扰动；大半径结果可能受非线性与裁剪影响。',
+                  '高Spearman只表示这些采样半径下的排序关系，不能证明等距映射、方向无关、距离比例固定或全局Lipschitz界；20个方向的最大最小值也不是Jacobian奇异值。','',
+                  '[总览](distance_overview.png)；[逐状态散点示例](state_examples.png)；[同方向半径扫描](direction_rays.png)。',
+                  'distance_samples.npz保存全部原始状态、动作、z0、单位方向、扰动z和动作、距离与增益；samples_long.csv每行一个扰动点。','',
+                  '复现：','```bash',f'.venv/bin/python scripts/dsrlna/analyze_demo_latents.py --latent-action-distance-experiment --steps {step} --distance-num-states {B} --distance-num-directions {M} --distance-radii '+' '.join(f'{r:g}' for r in radii)+f' --batch-size {args.batch_size} --platform {args.platform} --seed {args.seed}','```','']
+        (out/'REPORT.md').write_text('\n'.join(lines))
+        print(json.dumps(dict(pooled_rho=summary['pooled_spearman_radius_ties'],state_rho=summary['per_state_spearman_summary'],monotone_fraction=summary['all_radii_nondecreasing_direction_fraction'])),flush=True)
+        print(f'Latent/action distance results: {out}',flush=True)
+
+
+def analyze_demo_flow_geometry(args, run, config, paths):
+    """Run all four parts of experiment 4 with the shared inverse and decoder."""
+    from scripts.dsrlna.demo_flow_geometry import run_experiment
+    return run_experiment(args, run, config, paths, load_demos, make_functions)
+
+
 def main():
     args = parse_args()
+    if args.geometry_postprocess_from:
+        from scripts.dsrlna.demo_flow_geometry import postprocess
+        postprocess(args.geometry_postprocess_from, args.geometry_bootstrap)
+        return
+    if args.jacobian_minus_identity_from:
+        analyze_jacobian_minus_identity(args.jacobian_minus_identity_from)
+        return
     if args.temporal_clusters_from:
         analyze_temporal_latent_clouds(args.temporal_clusters_from, seed=args.seed, permutations=args.temporal_permutations)
         return
@@ -1180,7 +2089,7 @@ def main():
     run = discover_run(args)
     flags = json.loads((run / 'flags.json').read_text())
     config = flags['agent']
-    out = args.output / run.name
+    out = args.output / run.name / FLOW_INVERSE_OUTPUT_DIR
     if args.relationship_only:
         analyze_demo_policy_relationship(out, num_negatives=args.num_negatives, seed=args.seed,
                                          steps=args.steps, reference_step=args.reference_step,
@@ -1200,6 +2109,18 @@ def main():
             raise FileNotFoundError(f'Checkpoint steps not yet saved: {sorted(missing)}')
     if not paths:
         raise FileNotFoundError(f'No params_*.pkl saved yet in {run}; rerun after the next save')
+    if args.flow_geometry_experiment:
+        analyze_demo_flow_geometry(args, run, config, paths)
+        return
+    if args.latent_action_distance_experiment:
+        analyze_latent_action_distances(args, run, config, paths)
+        return
+    if args.latent_coordinate_experiment:
+        analyze_latent_coordinate_interventions(args, run, config, paths)
+        return
+    if args.invert_all_shifted_times:
+        analyze_all_demo_shifted_inverse(args, run, config, paths)
+        return
     if args.cluster_all_trajectories:
         analyze_all_demo_latent_clusters(args, run, config, paths)
         return
@@ -1214,13 +2135,14 @@ def main():
         raise ValueError('Demo actions outside decoder final clipping range [-1,1]')
     n, dimension = data['action_chunks'].shape
     invert, distribution = make_functions(config, dimension, args)
-    out = args.output / run.name
+    out = args.output / run.name / FLOW_INVERSE_OUTPUT_DIR
     out.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out / 'demos.npz', **data)
     metadata = dict(run_dir=str(run), dataset=str(args.dataset.resolve()), available_full_chunks=available,
                     num_samples=n, horizon=horizon, seed=args.seed, num_draws=args.num_draws,
-                    tolerance=args.tolerance, inverse_method='reverse_time_explicit_euler',
-                    reverse_times=[i / config['flow_steps'] for i in range(config['flow_steps'], 0, -1)],
+                    tolerance=args.tolerance, inverse_method=FLOW_INVERSE_METHOD,
+                    reverse_query_times=list(inverse_time_grid(config['flow_steps'])),
+                    reverse_times=list(inverse_time_grid(config['flow_steps'])),
                     distribution='raw Gaussian: z_prime ~ N(base_loc, diag(base_scale**2)); no tanh',
                     log_prob_source='raw Gaussian log_prob(unmodified_z_demo)',
                     action_magnitude=config['action_magnitude'], flow_steps=config['flow_steps'],

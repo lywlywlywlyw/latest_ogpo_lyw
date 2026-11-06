@@ -10,6 +10,7 @@ from ogpo.networks.encoders import encoder_modules
 from ogpo.agents.modules.flax_utils import ModuleDict, TrainState, nonpytree_field
 from ogpo.networks import Actor, Value, ActorVectorField, LogParam
 from ogpo.networks.modules.time_embedding import SinusoidalTimeEmbedding
+from ogpo.agents.modules.flow_inverse import invert_flow_actions_ode
 from ogpo.agents.modules.igp_targets_helper import get_flow_targets
 from ogpo.agents.modules.maintenance import (
     restore_critic_params as _restore_critic_params,
@@ -373,16 +374,18 @@ class DSRLInvertAgent(flax.struct.PyTreeNode):
 
     @jax.jit
     def actions_to_noise(self, observations, actions):
-        """Reverse-time Euler as in analyze_demo_latents.py, without clipping."""
+        """Shared inverse: t=(K-1)/K,...,0; fixed state and no clipping."""
         unbatched = observations.ndim == len(self.config['ob_dims'])
         if unbatched:
             observations, actions = observations[None, ...], actions[None, ...]
-        steps = self.config['flow_steps']
-        for i in range(steps, 0, -1):
-            t = jnp.full((observations.shape[0], 1), i / steps)
-            velocity = self.bc_flow_network.select('actor_bc_flow')(observations, actions, t)
-            actions = actions - velocity / steps
-        return actions[0] if unbatched else actions
+
+        def velocity(obs, x, t, is_encoded):
+            return self.bc_flow_network.select('actor_bc_flow')(
+                obs, x, t, is_encoded=is_encoded)
+
+        latents = invert_flow_actions_ode(
+            velocity, observations, actions, self.config['flow_steps'])
+        return latents[0] if unbatched else latents
 
     def restore_critic_params(self, critic_path):
         _restore_critic_params(self.critic_network, critic_path)

@@ -39,6 +39,7 @@ bc_flow_hidden_dims="[512,512,512,512,512]"
 # Offline base Gaussian and online KL budget
 base_bc_steps=100000
 kl_epsilon=0.1
+use_kl_loss=true
 init_kl_multiplier=1.0
 
 # Stability hyperparameters

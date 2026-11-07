@@ -117,19 +117,30 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
             'distill_noise_mean': z.mean(), 'distill_noise_std': z.std(),
         }
 
-    def policy_distribution(self, observations, params=None):
-        # Base parameters and per-state, per-dimension scales are frozen online.
+    def base_distribution(self, observations):
+        """Frozen reference distribution shared by sampling, residual inputs and KL."""
+        if self.config.get('use_normal_base_encoder', False):
+            batch_shape = observations.shape[:-len(self.config['ob_dims'])]
+            shape = (*batch_shape, self.config['noise_dim'])
+            return distrax.MultivariateNormalDiag(
+                loc=jnp.zeros(shape, dtype=observations.dtype),
+                scale_diag=jnp.ones(shape, dtype=observations.dtype))
         base = self.base_policy_network.select('actor')(observations)
         mean, std = jax.tree.map(jax.lax.stop_gradient, (base.mean(), base.stddev()))
-        delta = self.actor_network.select('actor')(observations, mean, params=params)
-        return distrax.MultivariateNormalDiag(loc=mean + delta, scale_diag=std)
+        return distrax.MultivariateNormalDiag(loc=mean, scale_diag=std)
+
+    def policy_distribution(self, observations, params=None):
+        base = self.base_distribution(observations)
+        delta = self.actor_network.select('actor')(observations, base.mean(), params=params)
+        return distrax.MultivariateNormalDiag(
+            loc=base.mean() + delta, scale_diag=base.stddev())
 
     def actor_loss(self, batch, grad_params, rng):
         dist = self.policy_distribution(batch['observations'], params=grad_params)
         z, log_probs = dist.sample_and_log_prob(seed=rng)
         qs = self.critic_network.select('critic')(batch['observations'], actions=z)
         q = jnp.min(qs, axis=0) if self.config['q_agg'] == 'min' else jnp.mean(qs, axis=0)
-        base = self.base_policy_network.select('actor')(batch['observations'])
+        base = self.base_distribution(batch['observations'])
         delta = dist.mean() - jax.lax.stop_gradient(base.mean())
         multiplier = self.actor_network.select('kl_multiplier')()
         # The frozen-covariance Gaussian has no mean-dependent entropy term.
@@ -168,6 +179,8 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
     @jax.jit
     def base_bc_update(self, batch):
         """Gaussian NLL learns both mu_b(s) and each sigma_b,i(s) offline."""
+        if self.config.get('use_normal_base_encoder', False):
+            return self, {'base_bc_skipped': jnp.float32(1.0)}
         def loss_fn(p):
             dist = self.base_policy_network.select('actor')(batch['observations'], params=p)
             loss = -dist.log_prob(batch['actions']).mean()
@@ -360,7 +373,8 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
         with open(actor_path, 'rb') as f:
             source = pickle.load(f)['agent']
         self.actor_network.params.update(source['actor_network']['params'])
-        self.base_policy_network.params.update(source['base_policy_network']['params'])
+        if not self.config.get('use_normal_base_encoder', False):
+            self.base_policy_network.params.update(source['base_policy_network']['params'])
 
     @classmethod
     def create(cls, seed, ex_observations, ex_actions, config):
@@ -369,6 +383,7 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
         if config.get('kl_epsilon', 0.1) < 0 or config.get('init_kl_multiplier', 1.0) <= 0:
             raise ValueError('Require kl_epsilon >= 0 and init_kl_multiplier > 0')
         config = dict(config)
+        config.setdefault('use_normal_base_encoder', False)
         config.setdefault('use_kl_loss', True)
         config.setdefault('kl_epsilon', 0.1)
         config.setdefault('init_kl_multiplier', 1.0)

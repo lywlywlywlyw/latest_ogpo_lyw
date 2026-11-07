@@ -1,8 +1,9 @@
-# Flow BC -> inverted demo latent Gaussian BC -> frozen base/flow residual SAC.
+# Flow BC -> optional inverse-latent base BC -> frozen Flow and residual mean policy.
 _base_: dsrlna.yaml
 
 agent:
   agent_name: dsrlresidual
+  use_normal_base_encoder: false  # True: skip base BC and use N(0,I) as the frozen base
   base_bc_steps: 100000
   base_log_std_min: -5.0       # Log-std floor for KL denominator only
   base_log_std_max: 2.0

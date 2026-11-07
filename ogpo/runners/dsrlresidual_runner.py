@@ -56,7 +56,10 @@ def _reshape_for_utd(batch, utd_ratio, batch_size):
 
 
 def run_residual_base_pretraining(agent, train_dataset, config, logger, start_step=0, mesh=None):
-    """After flow BC: invert all demo chunks once, then fit the base Gaussian."""
+    """After flow BC: invert demos and fit the base, unless using N(0, I)."""
+    if config.get('use_normal_base_encoder', False):
+        print('Using standard normal base N(0,I); skipping demo inversion and base encoder training')
+        return agent, start_step
     from ogpo.utils.sharding import shard_batch_flat
     batch_size = config['batch_size']
     horizon = config['horizon_length'] if config['action_chunking'] else 1

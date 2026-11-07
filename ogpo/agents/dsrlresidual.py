@@ -295,6 +295,29 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
         agent, infos = jax.lax.scan(self._critic_only_update, self, batch)
         return agent, jax.tree.map(lambda x: x.mean(), infos)
 
+    @partial(jax.jit, static_argnames=('num_samples',))
+    def sample_base_actions(self, observations, rng=None, num_samples=1):
+        """Frozen-base Flow evaluation; Best-of-N follows OGPO's action-Q rule."""
+        single = observations.ndim == len(self.config['ob_dims'])
+        if single:
+            observations = observations[None]
+        batch_size = observations.shape[0]
+        repeated = jnp.repeat(observations, num_samples, axis=0)
+        _, sample_rng = jax.random.split(rng)
+        z = self.base_distribution(repeated).sample(seed=sample_rng)
+        actions = self.noise_to_actions_public(repeated, z)
+        if num_samples > 1:
+            qs = self.action_critic_network.select('target_critic')(repeated, actions=actions)
+            qs = qs.reshape(qs.shape[0], batch_size, num_samples)
+            if self.config.get('subsample_bon', True):
+                selection_rng, _ = jax.random.split(rng)
+                _, selection_rng = jax.random.split(selection_rng)
+                indices = jax.random.randint(selection_rng, (2, batch_size, num_samples), 0, qs.shape[0])
+                qs = jnp.take_along_axis(qs, indices, axis=0)
+            best = jnp.argmax(jnp.min(qs, axis=0), axis=-1)
+            actions = actions.reshape(batch_size, num_samples, -1)[jnp.arange(batch_size), best]
+        return actions[0] if single else actions
+
     @jax.jit
     def sample_noise(self, observations, rng=None, deterministic=False):
         dist = self.policy_distribution(observations)
@@ -398,11 +421,12 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
             raise ValueError('Require kl_epsilon >= 0 and init_kl_multiplier > 0')
         config = dict(config)
         config.setdefault('use_invertionencoder_retrainflow', False)
-        config.setdefault('invertionencoder_retrainflow_steps', 100000)
+        config.setdefault('invertionencoder_retrainflow_steps', None)
         if config['use_invertionencoder_retrainflow']:
             if config.get('use_normal_base_encoder', False):
                 raise ValueError('Flow retraining requires use_normal_base_encoder=false and a trained inverse encoder')
-            if config['invertionencoder_retrainflow_steps'] < 1:
+            if (config['invertionencoder_retrainflow_steps'] is not None
+                    and config['invertionencoder_retrainflow_steps'] < 1):
                 raise ValueError('invertionencoder_retrainflow_steps must be positive')
         config.setdefault('use_normal_base_encoder', False)
         config.setdefault('use_base_distribution_in_qdistill', False)

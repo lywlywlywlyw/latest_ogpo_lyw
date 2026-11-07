@@ -39,7 +39,7 @@ noise_chunk_length=-1
 # Offline base Gaussian and online KL budget
 base_bc_steps=100000
 use_invertionencoder_retrainflow=false
-invertionencoder_retrainflow_steps=100000
+invertionencoder_retrainflow_steps=null
 use_normal_base_encoder=false
 use_base_distribution_in_qdistill=false
 kl_epsilon=0.1

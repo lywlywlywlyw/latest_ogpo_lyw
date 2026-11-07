@@ -4,6 +4,7 @@ Retains DSRL-NA chunk replay, critic updates and split UTD scheduling.
 """
 
 from types import SimpleNamespace
+from functools import partial
 from typing import Any, Dict, Optional, Tuple
 
 import jax
@@ -55,7 +56,9 @@ def _reshape_for_utd(batch, utd_ratio, batch_size):
     return jax.tree.map(lambda x: x.reshape((utd_ratio, batch_size) + x.shape[1:]), batch)
 
 
-def run_residual_base_pretraining(agent, train_dataset, config, logger, start_step=0, mesh=None):
+def run_residual_base_pretraining(agent, train_dataset, config, logger, start_step=0, mesh=None,
+                                 env_name=None, eval_env=None, eval_envs=None, save_dir=None,
+                                 n_eval_envs=32, eval_episodes=2):
     """After flow BC: invert demos and fit the base, unless using N(0, I)."""
     if config.get('use_normal_base_encoder', False):
         print('Using standard normal base N(0,I); skipping demo inversion and base encoder training')
@@ -89,7 +92,14 @@ def run_residual_base_pretraining(agent, train_dataset, config, logger, start_st
             logger.log(info, 'offline_agent', step=start_step + i)
     log_step = start_step + steps
     if config.get('use_invertionencoder_retrainflow', False):
-        retrain_steps = config.get('invertionencoder_retrainflow_steps', 100000)
+        # Same task defaults as scripts/offline/train.sh -> scripts/ogpo/*.sh.
+        maximum, eval_interval, early_stop = {
+            'square': (500000, 5000, True),
+            'transport': (1000000, 20000, False),
+            'tool_hang': (500000, 10000, True),
+        }[env_name.split('-')[0]]
+        retrain_steps = config.get('invertionencoder_retrainflow_steps') or maximum
+        eval_flags = _build_eval_flags(n_eval_envs, eval_episodes, config['discount'], env_name, env_name)
         for i in tqdm.trange(1, retrain_steps + 1, desc='Flow retraining from frozen base encoder'):
             batch = train_dataset.sample_sequence(
                 batch_size, sequence_length=horizon, discount=config['discount'])
@@ -99,6 +109,17 @@ def run_residual_base_pretraining(agent, train_dataset, config, logger, start_st
             log_step += 1
             if i % 1000 == 0 or i == retrain_steps:
                 logger.log(info, 'offline_agent', step=log_step)
+            if i % eval_interval == 0 or i == retrain_steps:
+                eval_info = _run_evaluation(
+                    agent, eval_env, eval_envs, eval_flags, config['action_dim'],
+                    partial(agent.sample_base_actions, num_samples=8), log_step,
+                    eval_episodes, 0, 3, env_name, plot=False)
+                logger.log(eval_info, 'eval', step=log_step)
+                success = eval_info.get('success', 0.)
+                print(f'Flow retraining step={i}: Best-of-8 success={success:.4f}')
+                if early_stop and success >= 0.5:
+                    save_agent(agent, save_dir, log_step)
+                    break
     return agent, log_step
 
 

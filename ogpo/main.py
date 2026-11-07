@@ -453,7 +453,9 @@ def main(*, offline_only=False):
 
     if algo_name == 'dsrlresidual' and not is_resumed:
         agent, log_step = run_residual_base_pretraining(
-            agent, train_dataset, agent_config, logger, start_step=log_step, mesh=mesh)
+            agent, train_dataset, agent_config, logger, start_step=log_step, mesh=mesh,
+            env_name=env_name, eval_env=eval_env, eval_envs=eval_envs, save_dir=save_dir,
+            n_eval_envs=n_eval_envs, eval_episodes=eval_config['eval_episodes'])
 
     if checkpoint_config.get('export_flow_path'):
         if is_resumed:

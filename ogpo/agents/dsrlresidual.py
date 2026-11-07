@@ -94,15 +94,21 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
             f'action_critic/{k}': v for k, v in info.items()}
 
     def critic_loss(self, batch, grad_params, rng):
-        """Distill online Qa(s, flow(s,z)) into Qz(s,z), with z ~ N(0,I).
+        """Distill Qa(s, flow(s,z)) at prior or frozen-base samples.
 
         Only replay states are reused: replay actions and TD fields do not enter
-        this loss. Match ensemble heads individually, as in DSRL-NA.
+        this loss. Base sampling excludes the online residual. Match ensemble
+        heads individually, as in DSRL-NA.
         """
         observations = batch['observations']
-        z = jax.random.normal(
-            rng, (observations.shape[0], self.config['noise_dim']),
-            dtype=observations.dtype)
+        use_base = self.config.get('use_base_distribution_in_qdistill', False)
+        if use_base:
+            z = jax.lax.stop_gradient(
+                self.base_distribution(observations).sample(seed=rng))
+        else:
+            z = jax.random.normal(
+                rng, (observations.shape[0], self.config['noise_dim']),
+                dtype=observations.dtype)
         actions = self.noise_to_actions_public(observations, z)
         target_q = jax.lax.stop_gradient(
             self.action_critic_network.select('critic')(observations, actions=actions))
@@ -115,6 +121,7 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
             'q_mean': q.mean(), 'q_max': q.max(), 'q_min': q.min(),
             'target_q_mean': target_q.mean(),
             'distill_noise_mean': z.mean(), 'distill_noise_std': z.std(),
+            'distill_uses_base_distribution': jnp.float32(use_base),
         }
 
     def base_distribution(self, observations):
@@ -384,6 +391,7 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
             raise ValueError('Require kl_epsilon >= 0 and init_kl_multiplier > 0')
         config = dict(config)
         config.setdefault('use_normal_base_encoder', False)
+        config.setdefault('use_base_distribution_in_qdistill', False)
         config.setdefault('use_kl_loss', True)
         config.setdefault('kl_epsilon', 0.1)
         config.setdefault('init_kl_multiplier', 1.0)

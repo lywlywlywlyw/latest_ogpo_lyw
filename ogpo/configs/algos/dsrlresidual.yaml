@@ -4,6 +4,7 @@ _base_: dsrlna.yaml
 agent:
   agent_name: dsrlresidual
   use_normal_base_encoder: false  # True: skip base BC and use N(0,I) as the frozen base
+  use_base_distribution_in_qdistill: false  # True: sample z from the frozen base (without residual)
   base_bc_steps: 100000
   base_log_std_min: -5.0       # Log-std floor for KL denominator only
   base_log_std_max: 2.0

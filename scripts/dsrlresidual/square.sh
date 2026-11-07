@@ -39,6 +39,7 @@ noise_chunk_length=-1
 # Offline base Gaussian and online KL budget
 base_bc_steps=100000
 use_normal_base_encoder=false
+use_base_distribution_in_qdistill=false
 kl_epsilon=0.1
 use_kl_loss=true
 init_kl_multiplier=1.0
@@ -178,6 +179,7 @@ echo "=== DSRLResidual Square | seed=$seed ==="
     --agent.noise_chunk_length=$noise_chunk_length \
     --agent.base_bc_steps=$base_bc_steps \
     --agent.use_normal_base_encoder=$use_normal_base_encoder \
+    --agent.use_base_distribution_in_qdistill=$use_base_distribution_in_qdistill \
     --agent.kl_epsilon=$kl_epsilon \
     --agent.use_kl_loss=$use_kl_loss \
     --agent.init_kl_multiplier=$init_kl_multiplier \

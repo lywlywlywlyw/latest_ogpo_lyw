@@ -87,7 +87,19 @@ def run_residual_base_pretraining(agent, train_dataset, config, logger, start_st
         agent, info = agent.base_bc_update(batch)
         if i % 1000 == 0 or i == steps:
             logger.log(info, 'offline_agent', step=start_step + i)
-    return agent, start_step + steps
+    log_step = start_step + steps
+    if config.get('use_invertionencoder_retrainflow', False):
+        retrain_steps = config.get('invertionencoder_retrainflow_steps', 100000)
+        for i in tqdm.trange(1, retrain_steps + 1, desc='Flow retraining from frozen base encoder'):
+            batch = train_dataset.sample_sequence(
+                batch_size, sequence_length=horizon, discount=config['discount'])
+            if mesh is not None:
+                batch = shard_batch_flat(batch, mesh)
+            agent, info = agent.bc_update(batch, use_base_distribution=True)
+            log_step += 1
+            if i % 1000 == 0 or i == retrain_steps:
+                logger.log(info, 'offline_agent', step=log_step)
+    return agent, log_step
 
 
 def run_dsrlresidual_online_rl(

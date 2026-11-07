@@ -38,6 +38,8 @@ bc_flow_hidden_dims="[512,512,512,512,512]"
 
 # Offline base Gaussian and online KL budget
 base_bc_steps=100000
+use_invertionencoder_retrainflow=false
+invertionencoder_retrainflow_steps=100000
 use_normal_base_encoder=false
 use_base_distribution_in_qdistill=false
 kl_epsilon=0.1
@@ -197,6 +199,8 @@ echo "=== DSRLResidual Toolhang | seed=$seed ==="
     --agent.noise_chunk_length=$noise_chunk_length \
     --agent.bc_flow_hidden_dims=$bc_flow_hidden_dims \
     --agent.base_bc_steps=$base_bc_steps \
+    --agent.use_invertionencoder_retrainflow=$use_invertionencoder_retrainflow \
+    --agent.invertionencoder_retrainflow_steps=$invertionencoder_retrainflow_steps \
     --agent.use_normal_base_encoder=$use_normal_base_encoder \
     --agent.use_base_distribution_in_qdistill=$use_base_distribution_in_qdistill \
     --agent.kl_epsilon=$kl_epsilon \

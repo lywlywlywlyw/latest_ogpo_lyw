@@ -1,4 +1,5 @@
 import copy
+from functools import partial
 from typing import Any, Tuple
 
 import distrax
@@ -205,16 +206,21 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
         info = {f'critic/{k}': v for k, v in c_info.items()}
         return c_loss, info
 
-    def bc_loss(self, batch, grad_params, rng):
+    def bc_loss(self, batch, grad_params, rng, use_base_distribution=False):
         batch_actions = preprocess_actions(batch, self.config["action_chunking"])
         batch_size = batch_actions.shape[0]
 
         rng, targets_rng = jax.random.split(rng)
-        x_t, vel, t = get_flow_targets(
-            batch['observations'],
-            batch_actions,
-            targets_rng,
-        )
+        if use_base_distribution:
+            _, noise_rng, time_rng = jax.random.split(targets_rng, 3)
+            x_0 = jax.lax.stop_gradient(
+                self.base_distribution(batch['observations']).sample(seed=noise_rng))
+            t = jax.random.uniform(time_rng, (batch_size, 1))
+            x_t = (1 - t) * x_0 + t * batch_actions
+            vel = batch_actions - x_0
+        else:
+            x_t, vel, t = get_flow_targets(
+                batch['observations'], batch_actions, targets_rng)
         pred = self.bc_flow_network.select('actor_bc_flow')(batch['observations'], x_t, t, params=grad_params)
 
         valid_mask = batch.get("valid", jnp.ones((batch_size, self.config["horizon_length"])))
@@ -226,6 +232,7 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
 
         return bc_flow_loss, {
             'bc_flow_loss': bc_flow_loss,
+            'flow_uses_base_distribution': jnp.float32(use_base_distribution),
         }
 
     def target_update(self, network, module_name):
@@ -256,16 +263,16 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
         ), {**actor_info, **critic_info, **action_info}
 
     @staticmethod
-    def _update_offline(agent, batch: dict) -> Tuple['DSRLResidualAgent', dict]:
+    def _update_offline(agent, batch: dict, use_base_distribution=False) -> Tuple['DSRLResidualAgent', dict]:
         new_rng, rng1 = jax.random.split(agent.rng, 2)
         def bc_loss_fn(p):
-            return agent.bc_loss(batch, p, rng1)
+            return agent.bc_loss(batch, p, rng1, use_base_distribution)
         new_bc_flow_state, info = agent.bc_flow_network.apply_loss_fn(bc_loss_fn)
         return agent.replace(bc_flow_network=new_bc_flow_state, rng=new_rng), info
 
-    @jax.jit
-    def bc_update(self, batch):
-        return self._update_offline(self, batch)
+    @partial(jax.jit, static_argnames=('use_base_distribution',))
+    def bc_update(self, batch, use_base_distribution=False):
+        return self._update_offline(self, batch, use_base_distribution)
 
     @jax.jit
     def batch_update(self, batch, batch_success=None, success_flag=False):
@@ -390,6 +397,13 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
         if config.get('kl_epsilon', 0.1) < 0 or config.get('init_kl_multiplier', 1.0) <= 0:
             raise ValueError('Require kl_epsilon >= 0 and init_kl_multiplier > 0')
         config = dict(config)
+        config.setdefault('use_invertionencoder_retrainflow', False)
+        config.setdefault('invertionencoder_retrainflow_steps', 100000)
+        if config['use_invertionencoder_retrainflow']:
+            if config.get('use_normal_base_encoder', False):
+                raise ValueError('Flow retraining requires use_normal_base_encoder=false and a trained inverse encoder')
+            if config['invertionencoder_retrainflow_steps'] < 1:
+                raise ValueError('invertionencoder_retrainflow_steps must be positive')
         config.setdefault('use_normal_base_encoder', False)
         config.setdefault('use_base_distribution_in_qdistill', False)
         config.setdefault('use_kl_loss', True)

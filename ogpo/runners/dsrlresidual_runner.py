@@ -65,6 +65,8 @@ def run_residual_base_pretraining(agent, train_dataset, config, logger, start_st
         return agent, start_step
     from ogpo.utils.sharding import shard_batch_flat
     batch_size = config['batch_size']
+    # Agent creation resolves dimensions on a config copy; the input may still contain None.
+    action_dim = train_dataset['actions'].shape[-1]
     horizon = config['horizon_length'] if config['action_chunking'] else 1
     ends = np.unique(np.append(np.flatnonzero(train_dataset['terminals']), train_dataset.size - 1))
     latents = np.empty((train_dataset.size, agent.config['noise_dim']), dtype=np.float32)
@@ -111,7 +113,7 @@ def run_residual_base_pretraining(agent, train_dataset, config, logger, start_st
                 logger.log(info, 'offline_agent', step=log_step)
             if i % eval_interval == 0 or i == retrain_steps:
                 eval_info = _run_evaluation(
-                    agent, eval_env, eval_envs, eval_flags, config['action_dim'],
+                    agent, eval_env, eval_envs, eval_flags, action_dim,
                     partial(agent.sample_base_actions, num_samples=8), log_step,
                     eval_episodes, 0, 3, env_name, plot=False)
                 logger.log(eval_info, 'eval', step=log_step)

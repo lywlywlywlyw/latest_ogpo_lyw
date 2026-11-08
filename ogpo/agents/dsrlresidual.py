@@ -135,6 +135,8 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
                 scale_diag=jnp.ones(shape, dtype=observations.dtype))
         base = self.base_policy_network.select('actor')(observations)
         mean, std = jax.tree.map(jax.lax.stop_gradient, (base.mean(), base.stddev()))
+        if self.config.get('use_one_variance', False):
+            std = jnp.ones_like(std)
         return distrax.MultivariateNormalDiag(loc=mean, scale_diag=std)
 
     def policy_distribution(self, observations, params=None):
@@ -441,6 +443,7 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
                     and config['invertionencoder_retrainflow_steps'] < 1):
                 raise ValueError('invertionencoder_retrainflow_steps must be positive')
         config.setdefault('use_normal_base_encoder', False)
+        config.setdefault('use_one_variance', False)
         config.setdefault('use_base_distribution_in_qdistill', False)
         config.setdefault('use_kl_loss', True)
         config.setdefault('kl_epsilon', 0.1)

@@ -41,6 +41,7 @@ base_bc_steps=100000
 use_invertionencoder_retrainflow=false
 invertionencoder_retrainflow_steps=null
 use_normal_base_encoder=false
+use_one_variance=false
 use_base_distribution_in_qdistill=false
 kl_epsilon=0.1
 use_kl_loss=true
@@ -183,6 +184,7 @@ echo "=== DSRLResidual Square | seed=$seed ==="
     --agent.use_invertionencoder_retrainflow=$use_invertionencoder_retrainflow \
     --agent.invertionencoder_retrainflow_steps=$invertionencoder_retrainflow_steps \
     --agent.use_normal_base_encoder=$use_normal_base_encoder \
+    --agent.use_one_variance=$use_one_variance \
     --agent.use_base_distribution_in_qdistill=$use_base_distribution_in_qdistill \
     --agent.kl_epsilon=$kl_epsilon \
     --agent.use_kl_loss=$use_kl_loss \

@@ -196,6 +196,18 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
         state, info = self.base_policy_network.apply_loss_fn(loss_fn)
         return self.replace(base_policy_network=state), info
 
+    def reset_flow_for_retraining(self, ex_observations, ex_actions):
+        """Start a fresh flow after inverse labels and the frozen base are fitted."""
+        rng, init_rng = jax.random.split(self.rng)
+        if self.config['action_chunking']:
+            ex_actions = jnp.concatenate([ex_actions] * self.config['horizon_length'], axis=-1)
+        network = self.bc_flow_network
+        params = network.model_def.init(
+            init_rng, actor_bc_flow=(ex_observations, ex_actions, ex_actions[..., :1]))['params']
+        # Recreate Adam moments and its step counter as well as network weights.
+        state = TrainState.create(network.model_def, params, network.tx)
+        return self.replace(rng=rng, bc_flow_network=state)
+
     def actor_total_loss(self, batch, grad_params, rng):
         a_loss, a_info = self.actor_loss(batch, grad_params, rng)
         info = {f'actor/{k}': v for k, v in a_info.items()}

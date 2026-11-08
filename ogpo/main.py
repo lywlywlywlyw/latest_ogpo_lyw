@@ -362,6 +362,8 @@ def main(*, offline_only=False):
               f"{agent_config['batch_size'] // num_mesh_devices} samples/device")
 
     prefixes = ["eval", "env", "offline_agent", "memory"]
+    if algo_name == 'dsrlresidual':
+        prefixes.extend(['offline_flow', 'offline_eval', 'offline_step_data'])
     online_steps = train_config["online_steps"]
     bc_only = train_config["bc_only"]
     if online_steps > 0 and not bc_only:
@@ -455,7 +457,9 @@ def main(*, offline_only=False):
         agent, log_step = run_residual_base_pretraining(
             agent, train_dataset, agent_config, logger, start_step=log_step, mesh=mesh,
             env_name=env_name, eval_env=eval_env, eval_envs=eval_envs, save_dir=save_dir,
-            n_eval_envs=n_eval_envs, eval_episodes=eval_config['eval_episodes'])
+            n_eval_envs=n_eval_envs, eval_episodes=eval_config['eval_episodes'],
+            log_interval=interval_config['log_interval'],
+            step_data_log_interval=interval_config['step_data_log_interval'])
 
     if checkpoint_config.get('export_flow_path'):
         if is_resumed:

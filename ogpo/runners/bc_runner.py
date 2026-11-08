@@ -53,7 +53,7 @@ def _run_evaluation(agent, eval_env, eval_envs, eval_flags, action_dim,
     return eval_info
 
 
-def _log_step_data(logger, batch, phase, log_step):
+def _log_step_data(logger, batch, phase, log_step, prefix='step_data'):
     try:
         logger.log({
             'phase': phase,
@@ -61,7 +61,7 @@ def _log_step_data(logger, batch, phase, log_step):
             'batch_obs_std': float(batch['observations'].std()),
             'batch_action_mean': float(batch['actions'].mean()),
             'batch_action_std': float(batch['actions'].std()),
-        }, "step_data", step=log_step)
+        }, prefix, step=log_step)
     except Exception:
         pass
 

@@ -17,6 +17,8 @@ from ogpo.utils.datasets import Dataset, ReplayBuffer
 from ogpo.utils.evaluation import evaluate, evaluate_parallel, _split_obs
 from ogpo.utils.main_helper import LoggingHelper, save_rolling_checkpoint
 from ogpo.utils.sharding import shard_batch
+from ogpo.utils.mem_monitor import log_memory
+from ogpo.runners.bc_runner import _log_step_data
 from ogpo.runners.online_rl_runner import (
     _wrap_actor_for_frozen_encoder, _state_for_encoder,
 )
@@ -58,7 +60,8 @@ def _reshape_for_utd(batch, utd_ratio, batch_size):
 
 def run_residual_base_pretraining(agent, train_dataset, config, logger, start_step=0, mesh=None,
                                  env_name=None, eval_env=None, eval_envs=None, save_dir=None,
-                                 n_eval_envs=32, eval_episodes=2):
+                                 n_eval_envs=32, eval_episodes=2, log_interval=1000,
+                                 step_data_log_interval=10):
     """After flow BC: invert demos and fit the base, unless using N(0, I)."""
     if config.get('use_normal_base_encoder', False):
         print('Using standard normal base N(0,I); skipping demo inversion and base encoder training')
@@ -94,6 +97,14 @@ def run_residual_base_pretraining(agent, train_dataset, config, logger, start_st
             logger.log(info, 'offline_agent', step=start_step + i)
     log_step = start_step + steps
     if config.get('use_invertionencoder_retrainflow', False):
+        # Inversion must use the loaded teacher. Only now replace its weights;
+        # the fitted base, residual actor and critics remain intact.
+        example = train_dataset.sample(())
+        agent = agent.reset_flow_for_retraining(example['observations'], example['actions'])
+        if mesh is not None:
+            from ogpo.utils.sharding import shard_agent
+            agent = shard_agent(agent, mesh)
+        print('Flow retraining: random initialization with a fresh optimizer (checkpoint used only for inversion)')
         # Same task defaults as scripts/offline/train.sh -> scripts/ogpo/*.sh.
         maximum, eval_interval, early_stop = {
             'square': (500000, 5000, True),
@@ -102,6 +113,8 @@ def run_residual_base_pretraining(agent, train_dataset, config, logger, start_st
         }[env_name.split('-')[0]]
         retrain_steps = config.get('invertionencoder_retrainflow_steps') or maximum
         eval_flags = _build_eval_flags(n_eval_envs, eval_episodes, config['discount'], env_name, env_name)
+        memory_interval = max(eval_interval, 50000)
+        log_memory('flow_retrain_start', step=log_step, logger=logger)
         for i in tqdm.trange(1, retrain_steps + 1, desc='Flow retraining from frozen base encoder'):
             batch = train_dataset.sample_sequence(
                 batch_size, sequence_length=horizon, discount=config['discount'])
@@ -109,19 +122,26 @@ def run_residual_base_pretraining(agent, train_dataset, config, logger, start_st
                 batch = shard_batch_flat(batch, mesh)
             agent, info = agent.bc_update(batch, use_base_distribution=True)
             log_step += 1
-            if i % 1000 == 0 or i == retrain_steps:
-                logger.log(info, 'offline_agent', step=log_step)
+            if step_data_log_interval > 0 and i % step_data_log_interval == 0:
+                _log_step_data(logger, batch, 'flow_retrain', log_step, prefix='offline_step_data')
+            should_log = (i == 1 or i == retrain_steps or i % eval_interval == 0 or
+                          (log_interval > 0 and i % log_interval == 0))
+            if should_log:
+                logger.log(dict(info, retrain_step=i), 'offline_flow', step=log_step)
             if i % eval_interval == 0 or i == retrain_steps:
                 eval_info = _run_evaluation(
                     agent, eval_env, eval_envs, eval_flags, action_dim,
                     partial(agent.sample_base_actions, num_samples=8), log_step,
                     eval_episodes, 0, 3, env_name, plot=False)
-                logger.log(eval_info, 'eval', step=log_step)
+                logger.log(dict(eval_info, retrain_step=i), 'offline_eval', step=log_step)
                 success = eval_info.get('success', 0.)
                 print(f'Flow retraining step={i}: Best-of-8 success={success:.4f}')
                 if early_stop and success >= 0.5:
                     save_agent(agent, save_dir, log_step)
                     break
+            if i % memory_interval == 0:
+                log_memory('flow_retrain', step=log_step, logger=logger)
+        log_memory('flow_retrain_end', step=log_step, logger=logger)
     return agent, log_step
 
 

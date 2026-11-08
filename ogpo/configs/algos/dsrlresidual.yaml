@@ -5,7 +5,7 @@ agent:
   agent_name: dsrlresidual
   use_normal_base_encoder: false  # True: skip base BC and use N(0,I) as the frozen base
   use_base_distribution_in_qdistill: false  # True: sample z from the frozen base (without residual)
-  use_invertionencoder_retrainflow: false  # After base BC, retrain Flow from frozen encoder samples
+  use_invertionencoder_retrainflow: false  # After base BC, randomly reinitialize Flow/optimizer and train from frozen encoder samples
   invertionencoder_retrainflow_steps: null  # Task default: Square/ToolHang 500k, Transport 1M
   base_bc_steps: 100000
   base_log_std_min: -5.0       # Log-std floor for KL denominator only

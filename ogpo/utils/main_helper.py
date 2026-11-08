@@ -36,6 +36,7 @@ class LoggingHelper:
         self.wandb_logger = wandb_logger
         self.log_enabled = log_enabled
         self.online_step_offset = None
+        self._wandb_pending = False
         self.first_time = time.time()
         self.last_time = time.time()
 
@@ -51,6 +52,7 @@ class LoggingHelper:
         # Start the online clock without creating incomplete CSV metric rows.
         # Keep this pending so the first environment log can use the same event step.
         self.wandb_logger.log({'online/step': online_step}, step=step + 1, commit=False)
+        self._wandb_pending = True
 
     def log(self, data: Dict, prefix: str, step: int):
         """Log data to CSV and WandB."""
@@ -66,10 +68,16 @@ class LoggingHelper:
             metrics = {f'{prefix}/{k}': v for k, v in data.items()}
             if is_online:
                 metrics['online/step'] = metric_step
-            self.wandb_logger.log(metrics, step=step)
+            # Several metric groups share an update step (loss, eval, memory).
+            # Keep the row open until the step advances so none are dropped.
+            self.wandb_logger.log(metrics, step=step, commit=False)
+            self._wandb_pending = True
 
     def close(self):
-        """Close all CSV loggers."""
+        """Commit the final W&B row and close all CSV loggers."""
+        if self._wandb_pending:
+            self.wandb_logger.log({}, commit=True)
+            self._wandb_pending = False
         for csv_logger in self.csv_loggers.values():
             if csv_logger is not None:
                 csv_logger.close()

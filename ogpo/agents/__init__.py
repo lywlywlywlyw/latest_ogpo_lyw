@@ -11,6 +11,7 @@ __all__ = [
     'dsrl',
     'dsrlna',
     'dsrlresidual',
+    'dsrlresidualv2',
     'dsrlinvert',
     'dsrllimit',
     'expo',

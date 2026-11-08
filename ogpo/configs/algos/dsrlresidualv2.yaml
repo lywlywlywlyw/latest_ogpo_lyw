@@ -1,0 +1,18 @@
+# Flow BC -> inverse-latent base BC -> frozen Flow/base and residual mean/std policy.
+_base_: dsrlna.yaml
+
+agent:
+  agent_name: dsrlresidualv2
+  use_normal_base_encoder: false  # True: skip base BC and use N(0,I) as the frozen base
+  use_one_variance: false  # True: unit-variance base reference; the online residual can still change sigma
+  use_base_distribution_in_qdistill: false  # True: sample z from the frozen base (without residual)
+  use_invertionencoder_retrainflow: false  # After base BC, randomly reinitialize Flow/optimizer and train from frozen encoder samples
+  invertionencoder_retrainflow_steps: null  # Task default: Square/ToolHang 500k, Transport 1M
+  base_bc_steps: 100000
+  residual_log_std_min: -5.0  # Lower bound on log(sigma_online / sigma_base)
+  residual_log_std_max: 2.0   # Upper bound; zero initializes sigma_online = sigma_base
+  use_kl_loss: true           # Enable actor KL regularization and dual loss
+  kl_epsilon: 0.1              # KL budget summed over latent dimensions
+  init_kl_multiplier: 1.0
+  noise_chunk_length: -1
+  entropy_backup: false

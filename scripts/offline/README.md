@@ -72,3 +72,48 @@ loading; SAC actors and critics are not replaced.
 DSRL replay now stores `chunk_steps` and `discounts`, with discounted rewards
 and gamma raised to the actual executed length. Legacy DSRL replay checkpoints
 are incompatible: start fresh instead of resuming the old chunk/reward schema.
+
+
+## Offline flow from an inverse-trained Gaussian
+
+Run from the repository root, with the same task hyperparameters as `train.sh`:
+
+```bash
+bash scripts/offline/train_invertion.sh square --seed=1 --device=0 \
+  --flow_checkpoint_path="$PWD/checkpoints/offline/square-mh-low_dim/seed_1.pkl" \
+  --base_bc_steps=100000 --training_step=90000 --early_stop=false
+```
+
+Omit `--flow_checkpoint_path` to first train a standard-normal teacher using the
+original offline BC runner. The script uses DSRLResidual's existing inverse and
+Gaussian encoder-BC implementations, resets the decoder and optimizer, and
+retrains with `bc_update(..., use_base_distribution=True)`. The encoder stays
+frozen during decoder retraining.
+
+`--training_step` controls only decoder retraining and defaults to **90,000**.
+`--early_stop` defaults to **false**, so all requested retraining updates run.
+With `--early_stop=true`, the original BC runner applies the task's existing
+`clip_bc_wrt` selection (ODE or SDE/BON) and success threshold. Teacher training
+keeps the task's original `bc_pi_steps` and early stopping settings.
+
+The same original offline runner and evaluation functions are used for both
+stages: `eval/success` is ODE success using the current decoder;
+`eval_sde/success` is real SDE/BON success using the EMA decoder. The SDE result is
+also recorded as **`eval/success_sde`**. Both samplers start from the trained
+encoder distribution during retraining. The existing shared SDE sampler accepts
+an optional Gaussian source; its default N(0,I) path is unchanged. OGPO's own EMA
+update is reused, with online and EMA weights reset together before retraining.
+
+Preparation and final retraining use separate W&B runs. The final run has an
+`_invertion_offline` suffix, starts at step zero, and preserves the original
+`offline_agent/bc_loss`, `offline_agent/bc_flow_loss_vel`,
+`offline_agent/bc_flow_loss_denoising`, `offline_agent/grad/*`, `eval/*`,
+`eval_sde/*`, and `step_data/*` metric names. Encoder metrics use
+`inverse_encoder/*` in the preparation run.
+
+`--base_bc_steps` defaults to 100,000. The final export defaults to
+`checkpoints/invertion_offline/<env_name>/seed_<seed>.pkl`; `--export_flow_path`
+overrides it. The `ogpo_invertion_offline_v1` payload contains decoder and encoder
+parameters and requires the encoder when loaded. Full agent snapshots also
+contain the EMA and original SDE noise network. This entrypoint supports low_dim
+state observations and standard velocity flow matching.

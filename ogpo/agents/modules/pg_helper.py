@@ -22,7 +22,8 @@ def flow_score_from_velocity(v: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray) -> 
 
 
 def sde_drift_correction(v: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray,
-                         sigma_base: jnp.ndarray, use_tapered_noise: bool) -> jnp.ndarray:
+                         sigma_base: jnp.ndarray, use_tapered_noise: bool,
+                         base_dist=None) -> jnp.ndarray:
     """Compute the (sigma_t^2 / 2) * score term for SDE marginal preservation.
 
     Theorem 17 / Prop. 1 in the flow matching notes give the SDE that
@@ -37,6 +38,8 @@ def sde_drift_correction(v: jnp.ndarray, x: jnp.ndarray, t: jnp.ndarray,
     caller must skip the final step (where t -> 1) to avoid blow-up.
     """
     tv_minus_x = t * v - x
+    if base_dist is not None:
+        tv_minus_x = (tv_minus_x + base_dist.mean()) / base_dist.variance()
     if use_tapered_noise:
         return 0.5 * sigma_base * sigma_base * tv_minus_x
     else:
@@ -140,9 +143,12 @@ def sample_flow_actions_sde(
         is_encoded: bool = False,
         params: Any = None,
         ft_flow_steps: int = 0,
+        base_dist=None,
     ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """
     Sample actions using stochastic SDE flow with noise injection.
+
+    base_dist optionally supplies a frozen Gaussian source instead of N(0,I).
 
     Noise schedules:
       * use_tapered_noise=True : sigma_t = constant_noise_std * sqrt(1-t).
@@ -168,13 +174,16 @@ def sample_flow_actions_sde(
     ft_start = flow_steps - effective_ft  # first transition index to include
 
     rng, key = jax.random.split(rng)
-    actions = jax.random.normal(key, (batch_size, act_dim))
+    actions = (jax.random.normal(key, (batch_size, act_dim))
+               if base_dist is None else base_dist.sample(seed=key))
     chains = [actions]
     sigmas = []
 
-    # Initial log prob p(x_0) ~ N(0, I); included only over the full chain
+    # Initial source log prob; included only over the full chain
     # (cancels in the IS ratio either way).
-    init_dist = distrax.Normal(jnp.zeros((batch_size, act_dim)), 1.0)
+    init_dist = (distrax.Normal(jnp.zeros((batch_size, act_dim)), 1.0)
+                 if base_dist is None else
+                 distrax.Normal(base_dist.mean(), base_dist.stddev()))
     if ft_start == 0:
         logprob = init_dist.log_prob(actions).sum(-1)
     else:
@@ -200,7 +209,7 @@ def sample_flow_actions_sde(
         )
         if apply_correction:
             drift = vels + sde_drift_correction(
-                vels, actions, t, constant_noise_std, use_tapered_noise
+                vels, actions, t, constant_noise_std, use_tapered_noise, base_dist=base_dist
             )
         else:
             drift = vels

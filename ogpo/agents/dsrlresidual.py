@@ -341,15 +341,17 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
         dist = self.policy_distribution(observations)
         if deterministic:
             return dist.mode() if hasattr(dist, 'mode') else dist.mean()
+        if self.config.get('add_noise2mean_insample', False):
+            mean_rng, rng = jax.random.split(rng)
+            mean = dist.mean()
+            dist = distrax.MultivariateNormalDiag(
+                loc=mean + jax.random.normal(mean_rng, mean.shape, dtype=mean.dtype),
+                scale_diag=dist.stddev())
         return dist.sample(seed=rng)
 
     @jax.jit
     def sample_actions(self, observations, rng=None, deterministic=False):
-        dist = self.policy_distribution(observations)
-        if deterministic:
-            actions = dist.mode() if hasattr(dist, 'mode') else dist.mean()
-        else:
-            actions = dist.sample(seed=rng)
+        actions = self.sample_noise(observations, rng=rng, deterministic=deterministic)
 
         if self.config["noise_chunk_length"] > 0:
             assert self.config["noise_chunk_length"] == 1
@@ -448,6 +450,7 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
                 raise ValueError('invertionencoder_retrainflow_steps must be positive')
         config.setdefault('use_normal_base_encoder', False)
         config.setdefault('use_one_variance', False)
+        config.setdefault('add_noise2mean_insample', False)
         config.setdefault('use_base_distribution_in_qdistill', False)
         config.setdefault('use_kl_loss', True)
         config.setdefault('use_only_mean_klloss', False)

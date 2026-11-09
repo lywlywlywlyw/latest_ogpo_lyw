@@ -43,6 +43,7 @@ use_invertionencoder_retrainflow=false
 invertionencoder_retrainflow_steps=null
 use_normal_base_encoder=false
 use_one_variance=false
+add_noise2mean_insample=false
 use_base_distribution_in_qdistill=false
 kl_epsilon=0.1
 use_kl_loss=true
@@ -186,6 +187,7 @@ echo "=== DSRLResidual Transport | seed=$seed ==="
     --agent.invertionencoder_retrainflow_steps=$invertionencoder_retrainflow_steps \
     --agent.use_normal_base_encoder=$use_normal_base_encoder \
     --agent.use_one_variance=$use_one_variance \
+    --agent.add_noise2mean_insample=$add_noise2mean_insample \
     --agent.use_base_distribution_in_qdistill=$use_base_distribution_in_qdistill \
     --agent.use_only_mean_klloss=$use_only_mean_klloss \
     --agent.kl_epsilon=$kl_epsilon \

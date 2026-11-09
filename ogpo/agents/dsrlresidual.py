@@ -336,7 +336,7 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
             actions = actions.reshape(batch_size, num_samples, -1)[jnp.arange(batch_size), best]
         return actions[0] if single else actions
 
-    @jax.jit
+    @partial(jax.jit, static_argnames=('deterministic',))
     def sample_noise(self, observations, rng=None, deterministic=False):
         dist = self.policy_distribution(observations)
         if deterministic:
@@ -349,7 +349,7 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
                 scale_diag=dist.stddev())
         return dist.sample(seed=rng)
 
-    @jax.jit
+    @partial(jax.jit, static_argnames=('deterministic',))
     def sample_actions(self, observations, rng=None, deterministic=False):
         actions = self.sample_noise(observations, rng=rng, deterministic=deterministic)
 

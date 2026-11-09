@@ -35,8 +35,6 @@ class ResidualMeanStd(nn.Module):
     layer_norm: bool = False
     encoder: Any = None
     obs_kwargs: Any = None
-    log_std_min: float = -5.0
-    log_std_max: float = 2.0
 
     @nn.compact
     def __call__(self, observations, base_mean):
@@ -52,9 +50,8 @@ class ResidualMeanStd(nn.Module):
             jnp.concatenate([x, base_mean], axis=-1))
         delta_mean = nn.Dense(self.action_dim, kernel_init=nn.initializers.zeros,
                               bias_init=nn.initializers.zeros, name='mean')(x)
-        raw_delta_log_std = nn.Dense(self.action_dim, kernel_init=nn.initializers.zeros,
-                                     bias_init=nn.initializers.zeros, name='log_std')(x)
-        delta_log_std = jnp.clip(raw_delta_log_std, self.log_std_min, self.log_std_max)
+        delta_log_std = nn.Dense(self.action_dim, kernel_init=nn.initializers.zeros,
+                                  bias_init=nn.initializers.zeros, name='log_std')(x)
         return delta_mean, delta_log_std
 
 
@@ -149,7 +146,10 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
         base = self.base_distribution(observations)
         delta_mean, delta_log_std = self.actor_network.select('actor')(
             observations, base.mean(), params=params)
-        log_std = jnp.log(base.stddev()) + delta_log_std
+        # Bound only the composed online distribution; residuals are unrestricted.
+        log_std = jnp.clip(
+            jnp.log(base.stddev()) + delta_log_std,
+            self.config['online_log_std_min'], self.config['online_log_std_max'])
         return distrax.MultivariateNormalDiag(
             loc=base.mean() + delta_mean,
             scale_diag=jnp.exp(log_std))
@@ -166,19 +166,27 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
         # through reparameterized samples and the full Gaussian KL.
         actor_loss = -jnp.mean(q)
         use_kl_loss = self.config.get('use_kl_loss', True)
-        kl = jnp.float32(0.0)
-        kl_mean = jnp.float32(0.0)
-        kl_std = jnp.float32(0.0)
+        # KL(pi || base): sum over latent dimensions, then average over states.
+        # Monitor both components even when regularization is disabled.
+        log_std = jnp.log(dist.stddev())
+        log_ratio = log_std - jnp.log(base.stddev())
+        kl_mean = (0.5 * jnp.sum(jnp.square(delta / base.stddev()), axis=-1)).mean()
+        kl_std = (0.5 * jnp.sum(jnp.expm1(2 * log_ratio) - 2 * log_ratio, axis=-1)).mean()
+        kl = kl_mean + kl_std
+        at_lower = log_std <= self.config['online_log_std_min']
+        at_upper = log_std >= self.config['online_log_std_max']
+        std_info = {
+            'online_log_std_mean': log_std.mean(),
+            'online_log_std_lower_bound_ratio': at_lower.mean(),
+            'online_log_std_upper_bound_ratio': at_upper.mean(),
+        }
+        for i in range(log_std.shape[-1]):
+            std_info[f'online_log_std_dim_{i}'] = log_std[..., i].mean()
+            std_info[f'online_log_std_lower_bound_ratio_dim_{i}'] = at_lower[..., i].mean()
+            std_info[f'online_log_std_upper_bound_ratio_dim_{i}'] = at_upper[..., i].mean()
         dual_loss = jnp.float32(0.0)
         constrained_loss = actor_loss
         if use_kl_loss:
-            # KL(pi || base), summed over latent dimensions and averaged over
-            # states. Use the actual positive sampling scales, without a floor.
-            ratio = dist.stddev() / base.stddev()
-            log_ratio = jnp.log(ratio)
-            kl_mean = (0.5 * jnp.sum(jnp.square(delta / base.stddev()), axis=-1)).mean()
-            kl_std = (0.5 * jnp.sum(jnp.expm1(2 * log_ratio) - 2 * log_ratio, axis=-1)).mean()
-            kl = kl_mean + kl_std
             constrained_loss = actor_loss + multiplier * (kl - self.config['kl_epsilon'])
             # Dual descent increases lambda when KL exceeds epsilon. Stop gradients
             # on both sides so actor and dual receive their respective objectives.
@@ -186,6 +194,7 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
             dual_loss = dual * jax.lax.stop_gradient(self.config['kl_epsilon'] - kl)
         total_loss = constrained_loss + dual_loss
         return total_loss, {
+            **std_info,
             'total_loss': total_loss, 'actor_loss': actor_loss,
             'kl': kl, 'kl_enabled': jnp.float32(use_kl_loss),
             'kl_mean': kl_mean, 'kl_std': kl_std,
@@ -454,10 +463,10 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
         if config.get('kl_epsilon', 0.1) < 0 or config.get('init_kl_multiplier', 1.0) <= 0:
             raise ValueError('Require kl_epsilon >= 0 and init_kl_multiplier > 0')
         config = dict(config)
-        config.setdefault('residual_log_std_min', -5.0)
-        config.setdefault('residual_log_std_max', 2.0)
-        if not config['residual_log_std_min'] <= 0 <= config['residual_log_std_max']:
-            raise ValueError('Residual log-std bounds must include zero for base initialization')
+        config.setdefault('online_log_std_min', -10.0)
+        config.setdefault('online_log_std_max', 0.0)
+        if not config['online_log_std_min'] < config['online_log_std_max']:
+            raise ValueError('Online log-std bounds require min < max')
         config.setdefault('use_invertionencoder_retrainflow', False)
         config.setdefault('invertionencoder_retrainflow_steps', None)
         if config['use_invertionencoder_retrainflow']:
@@ -534,8 +543,7 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
         actor_def = ResidualMeanStd(
             hidden_dims=config['actor_hidden_dims'], action_dim=noise_dim,
             layer_norm=config['actor_layer_norm'], encoder=encoders.get('actor'),
-            obs_kwargs=flax.core.FrozenDict(_two_tier_kwargs),
-            log_std_min=config['residual_log_std_min'], log_std_max=config['residual_log_std_max'])
+            obs_kwargs=flax.core.FrozenDict(_two_tier_kwargs))
         # Retain the scalar for optional entropy backup; actor uses Q + KL.
         temp_def = LogParam(init_value=config['init_temperature'])
 

@@ -46,8 +46,8 @@ use_base_distribution_in_qdistill=false
 kl_epsilon=0.1
 use_kl_loss=true
 init_kl_multiplier=1.0
-residual_log_std_min=-5.0
-residual_log_std_max=2.0
+online_log_std_min=-10.0
+online_log_std_max=0.0
 
 # Stability hyperparameters
 action_magnitude=1.5
@@ -188,7 +188,7 @@ echo "=== DSRLResidualV2 Transport | seed=$seed ==="
     --agent.use_base_distribution_in_qdistill=$use_base_distribution_in_qdistill \
     --agent.kl_epsilon=$kl_epsilon \
     --agent.init_kl_multiplier=$init_kl_multiplier \
-    --agent.residual_log_std_min=$residual_log_std_min \
-    --agent.residual_log_std_max=$residual_log_std_max \
+    --agent.online_log_std_min=$online_log_std_min \
+    --agent.online_log_std_max=$online_log_std_max \
     --agent.action_magnitude=$action_magnitude \
     --agent.clip_grad_norm=$clip_grad_norm

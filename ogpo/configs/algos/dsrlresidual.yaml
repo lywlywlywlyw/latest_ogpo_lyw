@@ -12,6 +12,7 @@ agent:
   base_log_std_min: -5.0       # Log-std floor for KL denominator only
   base_log_std_max: 2.0
   use_kl_loss: true           # Enable actor KL regularization and dual loss
+  use_only_mean_klloss: false  # True: use mean MSE for KL regularization, ignoring variance
   kl_epsilon: 0.1              # KL budget summed over latent dimensions
   init_kl_multiplier: 1.0
   noise_chunk_length: -1

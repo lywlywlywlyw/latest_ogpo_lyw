@@ -160,9 +160,13 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
         dual_loss = jnp.float32(0.0)
         constrained_loss = actor_loss
         if use_kl_loss:
-            # Floor only the denominator of this KL surrogate; keep sampling scales.
-            kl_std = jnp.maximum(dist.stddev(), jnp.exp(self.config['base_log_std_min']))
-            kl = (0.5 * jnp.sum(jnp.square(delta / kl_std), axis=-1)).mean()
+            if self.config.get('use_only_mean_klloss', False):
+                # Mean MSE ignores variance and averages over batch and latent dimensions.
+                kl = (0.5 * jnp.sum(jnp.square(delta), axis=-1)).mean()
+            else:
+                # Floor only the denominator of this KL surrogate; keep sampling scales.
+                kl_std = jnp.maximum(dist.stddev(), jnp.exp(self.config['base_log_std_min']))
+                kl = (0.5 * jnp.sum(jnp.square(delta / kl_std), axis=-1)).mean()
             constrained_loss = actor_loss + multiplier * (kl - self.config['kl_epsilon'])
             # Dual descent increases lambda when KL exceeds epsilon. Stop gradients
             # on both sides so actor and dual receive their respective objectives.
@@ -446,6 +450,7 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
         config.setdefault('use_one_variance', False)
         config.setdefault('use_base_distribution_in_qdistill', False)
         config.setdefault('use_kl_loss', True)
+        config.setdefault('use_only_mean_klloss', False)
         config.setdefault('kl_epsilon', 0.1)
         config.setdefault('init_kl_multiplier', 1.0)
         rng = jax.random.PRNGKey(seed)

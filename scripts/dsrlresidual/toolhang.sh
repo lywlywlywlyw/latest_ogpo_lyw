@@ -46,6 +46,7 @@ use_one_variance=false
 use_base_distribution_in_qdistill=false
 kl_epsilon=0.1
 use_kl_loss=true
+use_only_mean_klloss=false
 init_kl_multiplier=1.0
 
 # Stability hyperparameters
@@ -207,6 +208,7 @@ echo "=== DSRLResidual Toolhang | seed=$seed ==="
     --agent.use_normal_base_encoder=$use_normal_base_encoder \
     --agent.use_one_variance=$use_one_variance \
     --agent.use_base_distribution_in_qdistill=$use_base_distribution_in_qdistill \
+    --agent.use_only_mean_klloss=$use_only_mean_klloss \
     --agent.kl_epsilon=$kl_epsilon \
     --agent.init_kl_multiplier=$init_kl_multiplier \
     --agent.action_magnitude=$action_magnitude \

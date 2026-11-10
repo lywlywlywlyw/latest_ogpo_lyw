@@ -146,10 +146,12 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
         base = self.base_distribution(observations)
         delta_mean, delta_log_std = self.actor_network.select('actor')(
             observations, base.mean(), params=params)
-        # Bound only the composed online distribution; residuals are unrestricted.
-        log_std = jnp.clip(
-            jnp.log(base.stddev()) + delta_log_std,
-            self.config['online_log_std_min'], self.config['online_log_std_max'])
+        # Clip the composed distribution only when both bounds are configured.
+        log_std = jnp.log(base.stddev()) + delta_log_std
+        log_std_min = self.config['online_log_std_min']
+        log_std_max = self.config['online_log_std_max']
+        if log_std_min is not None and log_std_max is not None:
+            log_std = jnp.clip(log_std, log_std_min, log_std_max)
         return distrax.MultivariateNormalDiag(
             loc=base.mean() + delta_mean,
             scale_diag=jnp.exp(log_std))
@@ -181,9 +183,13 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
         kl_mean = (0.5 * jnp.sum(jnp.square(delta / base.stddev()), axis=-1)).mean()
         kl_std = (0.5 * jnp.sum(jnp.expm1(2 * log_ratio) - 2 * log_ratio, axis=-1)).mean()
         kl = (0.5 * jnp.sum(jnp.square(delta), axis=-1)).mean()#kl_mean + kl_std
-        at_lower = log_std <= self.config['online_log_std_min']
-        at_upper = log_std >= self.config['online_log_std_max']
+        log_std_min = self.config['online_log_std_min']
+        log_std_max = self.config['online_log_std_max']
+        clip_enabled = log_std_min is not None and log_std_max is not None
+        at_lower = log_std <= log_std_min if clip_enabled else jnp.zeros_like(log_std, dtype=bool)
+        at_upper = log_std >= log_std_max if clip_enabled else jnp.zeros_like(log_std, dtype=bool)
         std_info = {
+            'online_log_std_clip_enabled': jnp.float32(clip_enabled),
             'online_log_std_mean': log_std.mean(),
             'online_log_std_lower_bound_ratio': at_lower.mean(),
             'online_log_std_upper_bound_ratio': at_upper.mean(),
@@ -476,7 +482,9 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
         config = dict(config)
         config.setdefault('online_log_std_min', -10.0)
         config.setdefault('online_log_std_max', 0.0)
-        if not config['online_log_std_min'] < config['online_log_std_max']:
+        if (config['online_log_std_min'] is not None
+                and config['online_log_std_max'] is not None
+                and not config['online_log_std_min'] < config['online_log_std_max']):
             raise ValueError('Online log-std bounds require min < max')
         config.setdefault('use_invertionencoder_retrainflow', False)
         config.setdefault('invertionencoder_retrainflow_steps', None)

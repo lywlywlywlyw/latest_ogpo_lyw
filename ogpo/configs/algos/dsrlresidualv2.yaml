@@ -9,7 +9,8 @@ agent:
   use_invertionencoder_retrainflow: false  # After base BC, randomly reinitialize Flow/optimizer and train from frozen encoder samples
   invertionencoder_retrainflow_steps: null  # Task default: Square/ToolHang 500k, Transport 1M
   base_bc_steps: 100000
-  online_log_std_min: -10.0  # Bound log(sigma_base) + delta_log_std; residual is unclipped
+  # Clip log(sigma_base) + delta_log_std only if both bounds are set; either null disables clipping.
+  online_log_std_min: -10.0
   online_log_std_max: 0.0
   use_actor_entropy: false  # SAC on the full base + residual Gaussian; target = -noise_dim
   use_kl_loss: true           # Enable actor KL regularization and dual loss

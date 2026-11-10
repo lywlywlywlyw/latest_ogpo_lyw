@@ -96,6 +96,12 @@ With `--early_stop=true`, the original BC runner applies the task's existing
 `clip_bc_wrt` selection (ODE or SDE/BON) and success threshold. Teacher training
 keeps the task's original `bc_pi_steps` and early stopping settings.
 
+`--use_one_varience=True` (default **false**, spelling intentional) uses
+`N(mu_encoder(s), I)` for decoder retraining and its ODE/SDE evaluations.
+It reuses the existing `use_one_variance` implementation; inversion and encoder
+training still learn the original mean and per-dimension standard deviations.
+The selected source setting is recorded in W&B and the exported checkpoint config.
+
 The same original offline runner and evaluation functions are used for both
 stages: `eval/success` is ODE success using the current decoder;
 `eval_sde/success` is real SDE/BON success using the EMA decoder. The SDE result is

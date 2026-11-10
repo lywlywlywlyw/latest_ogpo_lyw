@@ -172,7 +172,7 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
         log_ratio = log_std - jnp.log(base.stddev())
         kl_mean = (0.5 * jnp.sum(jnp.square(delta / base.stddev()), axis=-1)).mean()
         kl_std = (0.5 * jnp.sum(jnp.expm1(2 * log_ratio) - 2 * log_ratio, axis=-1)).mean()
-        kl = kl_mean + kl_std
+        kl = (0.5 * jnp.sum(jnp.square(delta), axis=-1)).mean()#kl_mean + kl_std
         at_lower = log_std <= self.config['online_log_std_min']
         at_upper = log_std >= self.config['online_log_std_max']
         std_info = {

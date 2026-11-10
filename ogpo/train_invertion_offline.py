@@ -138,6 +138,7 @@ class InvertionOfflineAgent(DSRLResidualAgent):
         params['modules_actor'] = flow
         config = template.config.copy()
         config['noise_dim'] = self.config['noise_dim']
+        config['use_one_variance'] = self.config.get('use_one_variance', False)
         return InvertionEvaluationAgent(
             rng=self.rng, actor_network=template.actor_network.replace(params=params),
             critic_network=self.action_critic_network, config=config,
@@ -239,7 +240,8 @@ def _parse_launch_args():
     for name, key in (
             ('OGPO_INVERTION_BASE_BC_STEPS', 'agent.base_bc_steps'),
             ('OGPO_INVERTION_TRAINING_STEP', 'training_step'),
-            ('OGPO_INVERTION_EARLY_STOP', 'early_stop')):
+            ('OGPO_INVERTION_EARLY_STOP', 'early_stop'),
+            ('OGPO_INVERTION_USE_ONE_VARIENCE', 'use_one_varience')):
         if name in os.environ and key not in overrides:
             _, extra = parse_cli_args([f'--{key}={os.environ[name]}'])
             overrides.update(extra)
@@ -258,10 +260,13 @@ def main():
         raise ValueError('training.bc_pi_steps and agent.base_bc_steps must be positive')
     training_step = config.setdefault('training_step', 90000)
     early_stop = config.setdefault('early_stop', False)
+    use_one_varience = config.setdefault('use_one_varience', False)
     if isinstance(training_step, bool) or not isinstance(training_step, int) or training_step <= 0:
         raise ValueError('training_step must be a positive integer')
     if not isinstance(early_stop, bool):
         raise ValueError('early_stop must be true or false')
+    if not isinstance(use_one_varience, bool):
+        raise ValueError('use_one_varience must be true or false')
     ckpt = config['checkpoint']
     if any(ckpt.get(key) for key in ('resume_path', 'restore_actor_path', 'restore_critic_path')):
         raise ValueError('Use checkpoint.flow_path for the teacher; online resume/individual restores are unsupported')
@@ -339,12 +344,15 @@ def main():
     dataset.rng = dataset_jax_rng
     random.seed(seed)
     np.random.seed(seed)
+    agent = agent.replace(config=agent.config.copy(
+        dict(use_one_variance=use_one_varience)))
     agent = agent.reset_flow_for_retraining(example['observations'], example['actions'])
     if mesh is not None:
         agent = shard_agent(agent, mesh)
     retrain_config = copy.deepcopy(config)
     retrain_config['training']['bc_pi_steps'] = training_step
     retrain_config['bc']['clip_bc'] = early_stop
+    retrain_config['agent']['use_one_variance'] = use_one_varience
     save_dir, logger, _ = _start_logging(retrain_config, 'retrain')
     try:
         started = time.monotonic()

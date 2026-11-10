@@ -241,7 +241,8 @@ def _parse_launch_args():
             ('OGPO_INVERTION_BASE_BC_STEPS', 'agent.base_bc_steps'),
             ('OGPO_INVERTION_TRAINING_STEP', 'training_step'),
             ('OGPO_INVERTION_EARLY_STOP', 'early_stop'),
-            ('OGPO_INVERTION_USE_ONE_VARIENCE', 'use_one_varience')):
+            ('OGPO_INVERTION_USE_ONE_VARIENCE', 'use_one_varience'),
+            ('OGPO_INVERTION_USE_OT_OPTIMIZATION', 'use_OT_optimization')):
         if name in os.environ and key not in overrides:
             _, extra = parse_cli_args([f'--{key}={os.environ[name]}'])
             overrides.update(extra)
@@ -261,12 +262,15 @@ def main():
     training_step = config.setdefault('training_step', 90000)
     early_stop = config.setdefault('early_stop', False)
     use_one_varience = config.setdefault('use_one_varience', False)
+    use_OT_optimization = config.setdefault('use_OT_optimization', False)
     if isinstance(training_step, bool) or not isinstance(training_step, int) or training_step <= 0:
         raise ValueError('training_step must be a positive integer')
     if not isinstance(early_stop, bool):
         raise ValueError('early_stop must be true or false')
     if not isinstance(use_one_varience, bool):
         raise ValueError('use_one_varience must be true or false')
+    if not isinstance(use_OT_optimization, bool):
+        raise ValueError('use_OT_optimization must be true or false')
     ckpt = config['checkpoint']
     if any(ckpt.get(key) for key in ('resume_path', 'restore_actor_path', 'restore_critic_path')):
         raise ValueError('Use checkpoint.flow_path for the teacher; online resume/individual restores are unsupported')
@@ -345,7 +349,8 @@ def main():
     random.seed(seed)
     np.random.seed(seed)
     agent = agent.replace(config=agent.config.copy(
-        dict(use_one_variance=use_one_varience)))
+        dict(use_one_variance=use_one_varience,
+             use_OT_optimization=use_OT_optimization)))
     agent = agent.reset_flow_for_retraining(example['observations'], example['actions'])
     if mesh is not None:
         agent = shard_agent(agent, mesh)
@@ -353,6 +358,7 @@ def main():
     retrain_config['training']['bc_pi_steps'] = training_step
     retrain_config['bc']['clip_bc'] = early_stop
     retrain_config['agent']['use_one_variance'] = use_one_varience
+    retrain_config['agent']['use_OT_optimization'] = use_OT_optimization
     save_dir, logger, _ = _start_logging(retrain_config, 'retrain')
     try:
         started = time.monotonic()

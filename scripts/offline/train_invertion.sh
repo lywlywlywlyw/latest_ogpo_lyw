@@ -4,7 +4,9 @@ set -euo pipefail
 # Example: bash scripts/offline/train_invertion.sh square --device=0 \
 #   --flow_checkpoint_path=checkpoints/offline/square-mh-low_dim/seed_1.pkl \
 #   --base_bc_steps=100000 --training_step=90000 --early_stop=false \
-#   --use_one_varience=True
+#   --use_one_varience=True --use_OT_optimization=True
+# use_OT_optimization defaults to false; stage 3 selects the closest of 10
+# encoder latents to each demo action (Euclidean distance).
 TASK="${1:?Usage: train_invertion.sh square|transport|toolhang [--key=value]}"
 shift
 case "$TASK" in
@@ -28,6 +30,10 @@ for arg in "$@"; do
       export OGPO_INVERTION_USE_ONE_VARIENCE="${arg#*=}" ;;
     --use_one_varience)
       export OGPO_INVERTION_USE_ONE_VARIENCE=true ;;
+    --use_OT_optimization=*)
+      export OGPO_INVERTION_USE_OT_OPTIMIZATION="${arg#*=}" ;;
+    --use_OT_optimization)
+      export OGPO_INVERTION_USE_OT_OPTIMIZATION=true ;;
     *) task_args+=("$arg") ;;
   esac
 done

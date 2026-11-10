@@ -231,8 +231,26 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
         rng, targets_rng = jax.random.split(rng)
         if use_base_distribution:
             _, noise_rng, time_rng = jax.random.split(targets_rng, 3)
-            x_0 = jax.lax.stop_gradient(
-                self.base_distribution(batch['observations']).sample(seed=noise_rng))
+            base = self.base_distribution(batch['observations'])
+            if self.config.get('use_OT_optimization', False):
+                # Per demo, choose the nearest of 10 encoder samples directly
+                # in latent/action coordinates, before flow interpolation.
+                candidates = base.sample(seed=noise_rng, sample_shape=(10,))
+                distances = jnp.square(candidates - batch_actions[None, ...])
+                if self.config['action_chunking']:
+                    valid = batch.get('valid', jnp.ones(
+                        (batch_size, self.config['horizon_length'])))
+                    distances = distances.reshape(
+                        (10, batch_size, self.config['horizon_length'],
+                         self.config['action_dim']))
+                    distances = jnp.sum(distances * valid[None, ..., None], axis=(-2, -1))
+                else:
+                    distances = jnp.sum(distances, axis=-1)
+                nearest = jnp.argmin(distances, axis=0)
+                x_0 = candidates[nearest, jnp.arange(batch_size)]
+            else:
+                x_0 = base.sample(seed=noise_rng)
+            x_0 = jax.lax.stop_gradient(x_0)
             t = jax.random.uniform(time_rng, (batch_size, 1))
             x_t = (1 - t) * x_0 + t * batch_actions
             vel = batch_actions - x_0

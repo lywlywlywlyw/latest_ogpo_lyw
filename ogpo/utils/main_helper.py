@@ -352,6 +352,7 @@ def setup_experiment_logging(
     run_timestamp: Optional[str] = None,
     resume_wandb_id: Optional[str] = None,
     config: Optional[dict] = None,
+    reuse_wandb_run: bool = False,
 ) -> Tuple[str, LoggingHelper, Optional[str]]:
     """ Setup experiment logging infrastructure """
     import wandb
@@ -376,12 +377,17 @@ def setup_experiment_logging(
     wandb_run_id = None
 
     if log_enabled:
-        run = setup_wandb(
-            project=project, group=run_group, name=exp_name,
-            mode=os.environ.get("WANDB_MODE", "online"), config=config,
-            id=resume_wandb_id,
-            resume="allow" if resume_wandb_id else None,
-        )
+        if reuse_wandb_run:
+            if wandb.run is None:
+                raise RuntimeError('Cannot reuse W&B run before initialization')
+            run = wandb.run
+        else:
+            run = setup_wandb(
+                project=project, group=run_group, name=exp_name,
+                mode=os.environ.get("WANDB_MODE", "online"), config=config,
+                id=resume_wandb_id,
+                resume="allow" if resume_wandb_id else None,
+            )
         wandb_run_id = run.id
 
         save_dir = os.path.join(save_dir, run.project, run_group, env_name, exp_name)

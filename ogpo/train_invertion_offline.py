@@ -6,8 +6,8 @@ Example (inherits the original task's hyperparameters):
 
 Omit flow_checkpoint_path to first train the teacher exactly as train_offline.
 The final flow uses DSRLResidual BC with original offline ODE and SDE/BON evaluation.
-Teacher/encoder preparation and final flow training use separate W&B runs so
-final training starts at step zero with the original offline metric names.
+All stages share one online W&B run so a stage transition needs no network
+handshake. Final training retains its own step axis starting at zero.
 """
 import copy
 import glob
@@ -188,6 +188,31 @@ def train_inverse_encoder(agent, dataset, config, logger, start_step, mesh=None)
     return agent
 
 
+class _StageWandbLogger:
+    """Keep W&B event steps increasing while each stage has a local x-axis."""
+
+    def __init__(self, backend, stage, offset, prefixes):
+        self.backend = backend
+        self.stage = stage
+        self.offset = offset
+        self.step_metric = f'{stage}/step'
+        backend.define_metric(self.step_metric)
+        for prefix in prefixes:
+            metric_prefix = f'prepare/{prefix}' if stage == 'prepare' else prefix
+            backend.define_metric(
+                f'{metric_prefix}/*', step_metric=self.step_metric, step_sync=False)
+
+    def log(self, data, step=None, **kwargs):
+        if self.stage == 'prepare':
+            data = {f'prepare/{key}': value for key, value in data.items()}
+        else:
+            data = dict(data)
+        if step is not None:
+            data[self.step_metric] = step
+            kwargs['step'] = self.offset + step
+        self.backend.log(data, **kwargs)
+
+
 def _start_logging(config, stage):
     exp = config['experiment']
     stage_config = copy.deepcopy(config)
@@ -195,13 +220,19 @@ def _start_logging(config, stage):
     stage_config['flow_source_distribution'] = 'inverse_encoder' if stage == 'retrain' else 'normal'
     if stage == 'retrain':
         stage_config['evaluation_sampler'] = 'offline_ode_and_sde_bon'
-    return setup_experiment_logging(
+    result = setup_experiment_logging(
         seed=exp['seed'], project=exp['project'], run_group=exp['run_group'],
         wandb_name=exp['wandb_name'] + ('_invertion_offline' if stage == 'retrain' else '_invertion_teacher'),
         save_dir=exp['save_dir'], env_name=config['env']['name'],
         log_enabled=exp['log'],
         prefixes=['eval', 'eval_sde', 'offline_agent', 'memory', 'step_data', 'inverse_encoder'],
-        run_timestamp=make_run_timestamp(), config=stage_config)
+        run_timestamp=make_run_timestamp(), config=stage_config,
+        reuse_wandb_run=stage == 'retrain')
+    _, logger, _ = result
+    if logger.wandb_logger is not None:
+        logger.wandb_logger = _StageWandbLogger(
+            wandb, stage, wandb.run.step, logger.csv_loggers)
+    return result
 
 
 def _finish_logging(logger):
@@ -340,27 +371,26 @@ def main():
             agent = shard_agent(agent, mesh)
         agent = train_inverse_encoder(agent, dataset, agent_config, logger, teacher_steps, mesh)
         save_agent(agent, save_dir, teacher_steps + agent_config['base_bc_steps'])
-    finally:
-        _finish_logging(logger)
-    # Exactly the same decoder reset as use_invertionencoder_retrainflow:
-    # fit the encoder first, then reinitialize only the flow and its optimizer.
-    dataset.numpy_rng.bit_generator.state = dataset_rng_state
-    dataset.rng = dataset_jax_rng
-    random.seed(seed)
-    np.random.seed(seed)
-    agent = agent.replace(config=agent.config.copy(
-        dict(use_one_variance=use_one_varience,
-             use_OT_optimization=use_OT_optimization)))
-    agent = agent.reset_flow_for_retraining(example['observations'], example['actions'])
-    if mesh is not None:
-        agent = shard_agent(agent, mesh)
-    retrain_config = copy.deepcopy(config)
-    retrain_config['training']['bc_pi_steps'] = training_step
-    retrain_config['bc']['clip_bc'] = early_stop
-    retrain_config['agent']['use_one_variance'] = use_one_varience
-    retrain_config['agent']['use_OT_optimization'] = use_OT_optimization
-    save_dir, logger, _ = _start_logging(retrain_config, 'retrain')
-    try:
+        # Flush the preparation row locally, keeping the online run alive.
+        logger.close()
+        # Exactly the same decoder reset as use_invertionencoder_retrainflow:
+        # fit the encoder first, then reinitialize only the flow and its optimizer.
+        dataset.numpy_rng.bit_generator.state = dataset_rng_state
+        dataset.rng = dataset_jax_rng
+        random.seed(seed)
+        np.random.seed(seed)
+        agent = agent.replace(config=agent.config.copy(
+            dict(use_one_variance=use_one_varience,
+                 use_OT_optimization=use_OT_optimization)))
+        agent = agent.reset_flow_for_retraining(example['observations'], example['actions'])
+        if mesh is not None:
+            agent = shard_agent(agent, mesh)
+        retrain_config = copy.deepcopy(config)
+        retrain_config['training']['bc_pi_steps'] = training_step
+        retrain_config['bc']['clip_bc'] = early_stop
+        retrain_config['agent']['use_one_variance'] = use_one_varience
+        retrain_config['agent']['use_OT_optimization'] = use_OT_optimization
+        save_dir, logger, _ = _start_logging(retrain_config, 'retrain')
         started = time.monotonic()
         agent, step, info = _train_flow(
             agent, dataset, eval_env, eval_envs, retrain_config, logger, save_dir, mesh)

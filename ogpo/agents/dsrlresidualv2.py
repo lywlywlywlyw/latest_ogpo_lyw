@@ -162,9 +162,17 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
         base = self.base_distribution(batch['observations'])
         delta = dist.mean() - jax.lax.stop_gradient(base.mean())
         multiplier = self.actor_network.select('kl_multiplier')()
-        # Keep the Q + KL constrained objective; both heads receive gradients
-        # through reparameterized samples and the full Gaussian KL.
+        # SAC uses the complete base-plus-residual Gaussian, summed over its
+        # latent action dimensions. Keep temperature and actor gradients separate.
+        use_actor_entropy = self.config.get('use_actor_entropy', False)
+        temp = self.actor_network.select('temp')()
+        temp_loss = jnp.float32(0.0)
         actor_loss = -jnp.mean(q)
+        if use_actor_entropy:
+            actor_loss = jnp.mean(jax.lax.stop_gradient(temp) * log_probs - q)
+            temp_param = self.actor_network.select('temp')(params=grad_params)
+            entropy = -jax.lax.stop_gradient(log_probs).mean()
+            temp_loss = temp_param * (entropy - self.config['target_entropy'])
         use_kl_loss = self.config.get('use_kl_loss', True)
         # KL(pi || base): sum over latent dimensions, then average over states.
         # Monitor both components even when regularization is disabled.
@@ -192,10 +200,13 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
             # on both sides so actor and dual receive their respective objectives.
             dual = self.actor_network.select('kl_multiplier')(params=grad_params)
             dual_loss = dual * jax.lax.stop_gradient(self.config['kl_epsilon'] - kl)
-        total_loss = constrained_loss + dual_loss
+        total_loss = constrained_loss + dual_loss + temp_loss
         return total_loss, {
             **std_info,
             'total_loss': total_loss, 'actor_loss': actor_loss,
+            'actor_entropy_enabled': jnp.float32(use_actor_entropy),
+            'temp': temp, 'temp_loss': temp_loss,
+            'target_entropy': jnp.float32(self.config['target_entropy']),
             'kl': kl, 'kl_enabled': jnp.float32(use_kl_loss),
             'kl_mean': kl_mean, 'kl_std': kl_std,
             'kl_multiplier': multiplier, 'dual_loss': dual_loss,
@@ -479,6 +490,7 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
         config.setdefault('use_one_variance', False)
         config.setdefault('use_base_distribution_in_qdistill', False)
         config.setdefault('use_kl_loss', True)
+        config.setdefault('use_actor_entropy', False)
         config.setdefault('kl_epsilon', 0.1)
         config.setdefault('init_kl_multiplier', 1.0)
         rng = jax.random.PRNGKey(seed)
@@ -544,7 +556,7 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
             hidden_dims=config['actor_hidden_dims'], action_dim=noise_dim,
             layer_norm=config['actor_layer_norm'], encoder=encoders.get('actor'),
             obs_kwargs=flax.core.FrozenDict(_two_tier_kwargs))
-        # Retain the scalar for optional entropy backup; actor uses Q + KL.
+        # Temperature supports optional SAC actor entropy and entropy backup.
         temp_def = LogParam(init_value=config['init_temperature'])
 
         time_emb_type = config.get('time_embedding', 'scalar')
@@ -644,8 +656,8 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
         config['action_dim'] = action_dim
         config["noise_dim"] = noise_dim
 
-        if config['target_entropy'] is None:
-            config['target_entropy'] = -float(noise_dim) / 2
+        # The Gaussian action is the full latent chunk (e.g. Square: 7 * 4).
+        config['target_entropy'] = -float(noise_dim)
 
         return cls(rng, actor_state, critic_state, bc_flow_state,
                    config=flax.core.FrozenDict(**config), action_critic_network=action_critic_state,

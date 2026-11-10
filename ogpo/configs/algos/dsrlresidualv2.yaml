@@ -11,6 +11,7 @@ agent:
   base_bc_steps: 100000
   online_log_std_min: -10.0  # Bound log(sigma_base) + delta_log_std; residual is unclipped
   online_log_std_max: 0.0
+  use_actor_entropy: false  # SAC on the full base + residual Gaussian; target = -noise_dim
   use_kl_loss: true           # Enable actor KL regularization and dual loss
   kl_epsilon: 0.1              # KL budget summed over latent dimensions
   init_kl_multiplier: 1.0

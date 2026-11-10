@@ -7,7 +7,7 @@ agent:
   use_one_variance: false  # True: unit-variance base reference; the online residual can still change sigma
   use_base_distribution_in_qdistill: false  # True: sample z from the frozen base (without residual)
   use_invertionencoder_retrainflow: false  # After base BC, randomly reinitialize Flow/optimizer and train from frozen encoder samples
-  invertionencoder_retrainflow_steps: null  # Task default: Square/ToolHang 500k, Transport 1M
+  invertionencoder_retrainflow_steps: null  # null: task default steps/early stopping (Square/ToolHang 500k, Transport 1M); explicit steps: no early stopping
   base_bc_steps: 100000
   # Clip log(sigma_base) + delta_log_std only if both bounds are set; either null disables clipping.
   online_log_std_min: -10.0

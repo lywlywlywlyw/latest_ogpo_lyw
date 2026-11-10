@@ -111,7 +111,12 @@ def run_residualv2_base_pretraining(agent, train_dataset, config, logger, start_
             'transport': (1000000, 20000, False),
             'tool_hang': (500000, 10000, True),
         }[env_name.split('-')[0]]
-        retrain_steps = config.get('invertionencoder_retrainflow_steps') or maximum
+        retrain_steps = config.get('invertionencoder_retrainflow_steps')
+        if retrain_steps is None:
+            retrain_steps = maximum
+        else:
+            # An explicit budget always runs in full, regardless of success.
+            early_stop = False
         eval_flags = _build_eval_flags(n_eval_envs, eval_episodes, config['discount'], env_name, env_name)
         memory_interval = max(eval_interval, 50000)
         log_memory('flow_retrain_start', step=log_step, logger=logger)

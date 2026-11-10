@@ -499,6 +499,7 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
         config.setdefault('use_base_distribution_in_qdistill', False)
         config.setdefault('use_kl_loss', True)
         config.setdefault('use_actor_entropy', False)
+        config.setdefault('use_serl_target_entropy', False)
         config.setdefault('kl_epsilon', 0.1)
         config.setdefault('init_kl_multiplier', 1.0)
         rng = jax.random.PRNGKey(seed)
@@ -666,6 +667,8 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
 
         # The Gaussian action is the full latent chunk (e.g. Square: 7 * 4).
         config['target_entropy'] = -float(noise_dim)
+        if config['use_actor_entropy'] and config['use_serl_target_entropy']:
+            config['target_entropy'] /= 2
 
         return cls(rng, actor_state, critic_state, bc_flow_state,
                    config=flax.core.FrozenDict(**config), action_critic_network=action_critic_state,

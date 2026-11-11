@@ -41,6 +41,7 @@ base_bc_steps=100000
 use_invertionencoder_retrainflow=false
 invertionencoder_retrainflow_steps=null
 use_normal_base_encoder=false
+use_top_inversion=false
 use_one_variance=false
 use_base_distribution_in_qdistill=false
 kl_epsilon=0.1
@@ -208,6 +209,7 @@ echo "=== DSRLResidualV2 Toolhang | seed=$seed ==="
     --agent.use_invertionencoder_retrainflow=$use_invertionencoder_retrainflow \
     --agent.invertionencoder_retrainflow_steps=$invertionencoder_retrainflow_steps \
     --agent.use_normal_base_encoder=$use_normal_base_encoder \
+    --agent.use_top_inversion=$use_top_inversion \
     --agent.use_one_variance=$use_one_variance \
     --agent.use_base_distribution_in_qdistill=$use_base_distribution_in_qdistill \
     --agent.use_actor_entropy=$use_actor_entropy \

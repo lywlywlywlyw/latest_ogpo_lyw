@@ -226,8 +226,14 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
 
     @jax.jit
     def actions_to_noise(self, observations, actions):
-        """Invert demo chunks using the repository's shared reverse Euler rule."""
-        from ogpo.agents.modules.flow_inverse import invert_flow_actions_ode
+        """Invert demo chunks with reverse Euler or optional TOP midpoint."""
+        from ogpo.agents.modules.flow_inverse import (
+            invert_flow_actions_ode, invert_flow_actions_top,
+        )
+        if self.config.get('use_top_inversion', False):
+            return invert_flow_actions_top(
+                self.bc_flow_network.select('actor_bc_flow'), observations, actions,
+                is_encoded=False)
         return invert_flow_actions_ode(
             self.bc_flow_network.select('actor_bc_flow'), observations, actions,
             self.config['flow_steps'], is_encoded=False)
@@ -480,6 +486,7 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
         if config.get('kl_epsilon', 0.1) < 0 or config.get('init_kl_multiplier', 1.0) <= 0:
             raise ValueError('Require kl_epsilon >= 0 and init_kl_multiplier > 0')
         config = dict(config)
+        config.setdefault('use_top_inversion', False)
         config.setdefault('online_log_std_min', -10.0)
         config.setdefault('online_log_std_max', 0.0)
         if (config['online_log_std_min'] is not None

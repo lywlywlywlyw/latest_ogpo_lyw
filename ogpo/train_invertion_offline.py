@@ -273,7 +273,8 @@ def _parse_launch_args():
             ('OGPO_INVERTION_TRAINING_STEP', 'training_step'),
             ('OGPO_INVERTION_EARLY_STOP', 'early_stop'),
             ('OGPO_INVERTION_USE_ONE_VARIENCE', 'use_one_varience'),
-            ('OGPO_INVERTION_USE_OT_OPTIMIZATION', 'use_OT_optimization')):
+            ('OGPO_INVERTION_USE_OT_OPTIMIZATION', 'use_OT_optimization'),
+            ('OGPO_INVERTION_USE_TOP_INVERSION', 'use_top_inversion')):
         if name in os.environ and key not in overrides:
             _, extra = parse_cli_args([f'--{key}={os.environ[name]}'])
             overrides.update(extra)
@@ -294,6 +295,7 @@ def main():
     early_stop = config.setdefault('early_stop', False)
     use_one_varience = config.setdefault('use_one_varience', False)
     use_OT_optimization = config.setdefault('use_OT_optimization', False)
+    use_top_inversion = config.setdefault('use_top_inversion', False)
     if isinstance(training_step, bool) or not isinstance(training_step, int) or training_step <= 0:
         raise ValueError('training_step must be a positive integer')
     if not isinstance(early_stop, bool):
@@ -302,6 +304,9 @@ def main():
         raise ValueError('use_one_varience must be true or false')
     if not isinstance(use_OT_optimization, bool):
         raise ValueError('use_OT_optimization must be true or false')
+    if not isinstance(use_top_inversion, bool):
+        raise ValueError('use_top_inversion must be true or false')
+    ac['use_top_inversion'] = use_top_inversion
     ckpt = config['checkpoint']
     if any(ckpt.get(key) for key in ('resume_path', 'restore_actor_path', 'restore_critic_path')):
         raise ValueError('Use checkpoint.flow_path for the teacher; online resume/individual restores are unsupported')
@@ -365,6 +370,8 @@ def main():
                 agent, dataset, eval_env, eval_envs, config, logger, save_dir, mesh)
             save_flow_checkpoint(agent, os.path.join(save_dir, 'teacher_flow.pkl'),
                                  env_name=env_name, seed=seed, step=teacher_steps)
+        print('Demo inversion: ' + ('TOPS explicit midpoint (t=0.95 -> 0, dt=0.095, 10 steps, NFE=20)'
+                                    if use_top_inversion else 'reverse Euler'))
         # Switch to residual's own flow/encoder implementation before inversion.
         agent = make_inverse_agent(agent, example, agent_config, seed)
         if mesh is not None:

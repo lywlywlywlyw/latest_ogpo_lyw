@@ -47,6 +47,7 @@ kl_epsilon=0.1
 use_kl_loss=true
 use_actor_entropy=false
 use_serl_target_entropy=false
+use_low_target_entropy=false  # With actor entropy enabled, overrides the SERL target
 init_kl_multiplier=1.0
 online_log_std_min=-10.0
 online_log_std_max=0.0
@@ -211,6 +212,7 @@ echo "=== DSRLResidualV2 Toolhang | seed=$seed ==="
     --agent.use_base_distribution_in_qdistill=$use_base_distribution_in_qdistill \
     --agent.use_actor_entropy=$use_actor_entropy \
     --agent.use_serl_target_entropy=$use_serl_target_entropy \
+    --agent.use_low_target_entropy=$use_low_target_entropy \
     --agent.kl_epsilon=$kl_epsilon \
     --agent.init_kl_multiplier=$init_kl_multiplier \
     --agent.online_log_std_min=$online_log_std_min \

@@ -1,0 +1,11 @@
+# Public policy only. Addresses, ports, executable paths and credentials are discovered from clashctl at runtime.
+domains:
+- wandb.ai
+- wandb.com
+- storage.googleapis.com
+candidates:
+- 🇯🇵 Basic-日本-BGP-02|v202605
+- 🇸🇬 Basic-新加坡-BGP-01|v202605
+- 🇺🇸 美国-BGP-07【优化】
+preflight_attempts: 3
+request_timeout_seconds: 10

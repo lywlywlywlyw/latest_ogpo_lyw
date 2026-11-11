@@ -184,8 +184,14 @@ class DSRLResidualAgent(flax.struct.PyTreeNode):
 
     @jax.jit
     def actions_to_noise(self, observations, actions):
-        """Invert demo chunks using the repository's shared reverse Euler rule."""
-        from ogpo.agents.modules.flow_inverse import invert_flow_actions_ode
+        """Invert demo chunks with reverse Euler or TOPS explicit midpoint."""
+        from ogpo.agents.modules.flow_inverse import (
+            invert_flow_actions_ode, invert_flow_actions_top,
+        )
+        if self.config.get('use_top_inversion', False):
+            return invert_flow_actions_top(
+                self.bc_flow_network.select('actor_bc_flow'), observations, actions,
+                is_encoded=False)
         return invert_flow_actions_ode(
             self.bc_flow_network.select('actor_bc_flow'), observations, actions,
             self.config['flow_steps'], is_encoded=False)

@@ -123,6 +123,12 @@ def setup_wandb(
     if resume is not None:
         init_kwargs['resume'] = resume
 
+    if mode == "online":
+        from ogpo.utils.wandb_proxy import ensure_wandb_proxy
+        proxy = ensure_wandb_proxy()
+        init_kwargs["settings"].http_proxy = proxy.url
+        init_kwargs["settings"].https_proxy = proxy.url
+
     run = wandb.init(**init_kwargs)
 
     return run

@@ -5,6 +5,9 @@ set -euo pipefail
 #   --flow_checkpoint_path=checkpoints/offline/square-mh-low_dim/seed_1.pkl \
 #   --base_bc_steps=100000 --training_step=90000 --early_stop=false \
 #   --use_one_varience=True --use_OT_optimization=True
+# --use_top_inversion=True uses invert_flow_actions_top from t=0.95 to 0:
+# 10 explicit-midpoint steps (dt=0.095, NFE=20), independent of flow_steps.
+# use_top_inversion defaults to false.
 # use_OT_optimization defaults to false; stage 3 selects the closest of 10
 # encoder latents to each demo action (Euclidean distance).
 TASK="${1:?Usage: train_invertion.sh square|transport|toolhang [--key=value]}"
@@ -34,6 +37,10 @@ for arg in "$@"; do
       export OGPO_INVERTION_USE_OT_OPTIMIZATION="${arg#*=}" ;;
     --use_OT_optimization)
       export OGPO_INVERTION_USE_OT_OPTIMIZATION=true ;;
+    --use_top_inversion=*)
+      export OGPO_INVERTION_USE_TOP_INVERSION="${arg#*=}" ;;
+    --use_top_inversion)
+      export OGPO_INVERTION_USE_TOP_INVERSION=true ;;
     *) task_args+=("$arg") ;;
   esac
 done

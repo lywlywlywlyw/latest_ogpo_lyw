@@ -31,12 +31,13 @@ from ogpo.agents.modules.pg_helper import (
 )
 
 class ResidualMeanStd(nn.Module):
-    """Conditional residual Gaussian with zero-initialized mean/log-std heads."""
+    """Conditional residual Gaussian with zero mean and configurable initial std."""
     hidden_dims: Any
     action_dim: int
     layer_norm: bool = False
     encoder: Any = None
     obs_kwargs: Any = None
+    init_std: float = 1.0
 
     @nn.compact
     def __call__(self, observations, base_latent):
@@ -53,7 +54,8 @@ class ResidualMeanStd(nn.Module):
         delta_mean = nn.Dense(self.action_dim, kernel_init=nn.initializers.zeros,
                               bias_init=nn.initializers.zeros, name='mean')(x)
         delta_log_std = nn.Dense(self.action_dim, kernel_init=nn.initializers.zeros,
-                                  bias_init=nn.initializers.zeros, name='log_std')(x)
+                                  bias_init=nn.initializers.constant(math.log(self.init_std)),
+                                  name='log_std')(x)
         return delta_mean, delta_log_std
 
 
@@ -502,7 +504,8 @@ class DSRLResidualV3Agent(flax.struct.PyTreeNode):
         config.setdefault('use_restrain_loss', True)
         config.setdefault('restrain_threshold', 0.35)
         config.setdefault('init_restrain_multiplier', 1.0)
-        for key in ('restrain_threshold', 'init_restrain_multiplier'):
+        config.setdefault('residual_init_std', 1.0)
+        for key in ('restrain_threshold', 'init_restrain_multiplier', 'residual_init_std'):
             value = config[key]
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f'{key} must be finite and positive')
@@ -594,7 +597,8 @@ class DSRLResidualV3Agent(flax.struct.PyTreeNode):
         actor_def = ResidualMeanStd(
             hidden_dims=config['actor_hidden_dims'], action_dim=noise_dim,
             layer_norm=config['actor_layer_norm'], encoder=encoders.get('actor'),
-            obs_kwargs=flax.core.FrozenDict(_two_tier_kwargs))
+            obs_kwargs=flax.core.FrozenDict(_two_tier_kwargs),
+            init_std=float(config['residual_init_std']))
         # Temperature supports optional SAC actor entropy and entropy backup.
         temp_def = LogParam(init_value=config['init_temperature'])
 

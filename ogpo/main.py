@@ -44,6 +44,10 @@ from ogpo.agents.dsrl import DSRLBestOfNAgent
 from ogpo.agents.dsrlna import DSRLNAAgent
 from ogpo.agents.dsrlresidual import DSRLResidualAgent
 from ogpo.agents.dsrlresidualv2 import DSRLResidualV2Agent
+from ogpo.agents.dsrlresidualv3 import DSRLResidualV3Agent
+from ogpo.runners.dsrlresidualv3_runner import (
+    run_dsrlresidualv3_online_rl, run_residualv3_base_pretraining,
+)
 from ogpo.runners.dsrlresidualv2_runner import (
     run_dsrlresidualv2_online_rl, run_residualv2_base_pretraining,
 )
@@ -149,6 +153,7 @@ AGENTS = {
     "dsrlna": DSRLNAAgent,
     "dsrlresidual": DSRLResidualAgent,
     "dsrlresidualv2": DSRLResidualV2Agent,
+    "dsrlresidualv3": DSRLResidualV3Agent,
     "dsrlinvert": DSRLInvertAgent,
     "dsrllimit": DSRLLimitAgent,
     "dsrl": DSRLBestOfNAgent,
@@ -367,7 +372,7 @@ def main(*, offline_only=False):
               f"{agent_config['batch_size'] // num_mesh_devices} samples/device")
 
     prefixes = ["eval", "env", "offline_agent", "memory"]
-    if algo_name in ('dsrlresidual', 'dsrlresidualv2'):
+    if algo_name in ('dsrlresidual', 'dsrlresidualv2', 'dsrlresidualv3'):
         prefixes.extend(['offline_flow', 'offline_eval', 'offline_step_data'])
     online_steps = train_config["online_steps"]
     bc_only = train_config["bc_only"]
@@ -428,7 +433,9 @@ def main(*, offline_only=False):
         restore_actor_path = checkpoint_config["restore_actor_path"]
         restore_critic_path = checkpoint_config["restore_critic_path"]
         if restore_actor_path and restore_actor_path != "None":
-            agent.restore_actor_params(restore_actor_path)
+            restored_agent = agent.restore_actor_params(restore_actor_path)
+            if restored_agent is not None:
+                agent = restored_agent
             print(f"Restored actor from {restore_actor_path}")
         if restore_critic_path and restore_critic_path != "None":
             agent.restore_critic_params(restore_critic_path)
@@ -458,9 +465,11 @@ def main(*, offline_only=False):
             f"BC Training Complete. Final success rate: {eval_info.get('success', 'N/A')}"
         )
 
-    if algo_name in ('dsrlresidual', 'dsrlresidualv2') and not is_resumed:
-        base_pretraining = (run_residualv2_base_pretraining if algo_name == 'dsrlresidualv2'
-                            else run_residual_base_pretraining)
+    if algo_name in ('dsrlresidual', 'dsrlresidualv2', 'dsrlresidualv3') and not is_resumed:
+        base_pretraining = dict(
+            dsrlresidual=run_residual_base_pretraining,
+            dsrlresidualv2=run_residualv2_base_pretraining,
+            dsrlresidualv3=run_residualv3_base_pretraining)[algo_name]
         agent, log_step = base_pretraining(
             agent, train_dataset, agent_config, logger, start_step=log_step, mesh=mesh,
             env_name=env_name, eval_env=eval_env, eval_envs=eval_envs, save_dir=save_dir,
@@ -689,6 +698,8 @@ def main(*, offline_only=False):
         agent, log_step, final_eval_info, replay_buffer = run_dsrlinvert_online_rl(**runner_kwargs)
     elif algo_name == "dsrlresidual":
         agent, log_step, final_eval_info, replay_buffer = run_dsrlresidual_online_rl(**runner_kwargs)
+    elif algo_name == "dsrlresidualv3":
+        agent, log_step, final_eval_info, replay_buffer = run_dsrlresidualv3_online_rl(**runner_kwargs)
     elif algo_name == "dsrlresidualv2":
         agent, log_step, final_eval_info, replay_buffer = run_dsrlresidualv2_online_rl(**runner_kwargs)
     elif algo_name == "dsrllimit":

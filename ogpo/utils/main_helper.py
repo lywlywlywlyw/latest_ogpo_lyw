@@ -220,6 +220,10 @@ def load_rolling_checkpoint(seed: int, env_name: str, agent_structure: Any,
         online_step = metadata.get('online_loop_step', 0)
         if online_step <= 0:
             raise ValueError(f'Checkpoint {step} has no valid online step count')
+        if algo_name == 'dsrlresidualv3':
+            has_mppca = agent_state.get('top_distribution') is not None
+            if has_mppca != agent_structure.config.get('use_top_distribution', False):
+                raise ValueError('Resume use_top_distribution must match checkpoint source')
         agent = flax.serialization.from_state_dict(agent_structure, agent_state)
         print(f'Resumed online checkpoint: {agent_path} (online step {online_step})')
         return agent, replay_buffer, step, online_step, metadata.get('wandb_run_id')

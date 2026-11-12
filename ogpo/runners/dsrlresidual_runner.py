@@ -58,18 +58,10 @@ def _reshape_for_utd(batch, utd_ratio, batch_size):
     return jax.tree.map(lambda x: x.reshape((utd_ratio, batch_size) + x.shape[1:]), batch)
 
 
-def run_residual_base_pretraining(agent, train_dataset, config, logger, start_step=0, mesh=None,
-                                 env_name=None, eval_env=None, eval_envs=None, save_dir=None,
-                                 n_eval_envs=32, eval_episodes=2, log_interval=1000,
-                                 step_data_log_interval=10):
-    """After flow BC: invert demos and fit the base, unless using N(0, I)."""
-    if config.get('use_normal_base_encoder', False):
-        print('Using standard normal base N(0,I); skipping demo inversion and base encoder training')
-        return agent, start_step
-    from ogpo.utils.sharding import shard_batch_flat
+def invert_demo_latents(agent, train_dataset, config):
+    """Reverse full action chunks, padding at episode boundaries."""
     batch_size = config['batch_size']
     # Agent creation resolves dimensions on a config copy; the input may still contain None.
-    action_dim = train_dataset['actions'].shape[-1]
     horizon = config['horizon_length'] if config['action_chunking'] else 1
     ends = np.unique(np.append(np.flatnonzero(train_dataset['terminals']), train_dataset.size - 1))
     latents = np.empty((train_dataset.size, agent.config['noise_dim']), dtype=np.float32)
@@ -83,6 +75,21 @@ def run_residual_base_pretraining(agent, train_dataset, config, logger, start_st
         latents[idxs] = np.asarray(agent.actions_to_noise(observations, actions))
     if not np.isfinite(latents).all():
         raise ValueError('Nonfinite inverted demo latents')
+    return latents
+
+
+def run_residual_base_pretraining(agent, train_dataset, config, logger, start_step=0, mesh=None,
+                                 env_name=None, eval_env=None, eval_envs=None, save_dir=None,
+                                 n_eval_envs=32, eval_episodes=2, log_interval=1000,
+                                 step_data_log_interval=10):
+    """After flow BC: invert demos and fit the base, unless using N(0, I)."""
+    if config.get('use_normal_base_encoder', False):
+        print('Using standard normal base N(0,I); skipping demo inversion and base encoder training')
+        return agent, start_step
+    from ogpo.utils.sharding import shard_batch_flat
+    batch_size = config['batch_size']
+    horizon = config['horizon_length'] if config['action_chunking'] else 1
+    latents = invert_demo_latents(agent, train_dataset, config)
     steps = config['base_bc_steps']
     if steps < 1:
         raise ValueError('base_bc_steps must be positive for a fresh DSRLResidual run')

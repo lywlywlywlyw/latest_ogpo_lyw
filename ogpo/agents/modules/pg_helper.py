@@ -148,7 +148,7 @@ def sample_flow_actions_sde(
     """
     Sample actions using stochastic SDE flow with noise injection.
 
-    base_dist optionally supplies a frozen Gaussian source instead of N(0,I).
+    base_dist optionally supplies a frozen source distribution instead of N(0,I).
 
     Noise schedules:
       * use_tapered_noise=True : sigma_t = constant_noise_std * sqrt(1-t).
@@ -181,11 +181,10 @@ def sample_flow_actions_sde(
 
     # Initial source log prob; included only over the full chain
     # (cancels in the IS ratio either way).
-    init_dist = (distrax.Normal(jnp.zeros((batch_size, act_dim)), 1.0)
-                 if base_dist is None else
-                 distrax.Normal(base_dist.mean(), base_dist.stddev()))
     if ft_start == 0:
-        logprob = init_dist.log_prob(actions).sum(-1)
+        logprob = (distrax.Normal(jnp.zeros((batch_size, act_dim)), 1.0)
+                   .log_prob(actions).sum(-1) if base_dist is None
+                   else base_dist.log_prob(actions))
     else:
         logprob = jnp.zeros(batch_size)
 

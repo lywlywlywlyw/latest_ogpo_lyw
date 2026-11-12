@@ -1,4 +1,4 @@
-"""Offline teacher flow -> inverse Gaussian encoder -> freshly trained flow.
+"""Offline teacher flow -> inverse Gaussian encoder or MPPCA -> fresh flow.
 
 Example (inherits the original task's hyperparameters):
     bash scripts/offline/train_invertion.sh square --device=0 --seed=1 \
@@ -44,13 +44,20 @@ from ogpo.utils.main_helper import (
 from ogpo.utils.sharding import create_mesh, shard_agent
 
 from ogpo.runners.offline_runner import run_offline_pretraining
-from ogpo.runners.dsrlresidual_runner import run_residual_base_pretraining
+from ogpo.runners.dsrlresidual_runner import run_residual_base_pretraining, invert_demo_latents
+from ogpo.agents.modules.mppca import MPPCA, fit_mppca
 
 
 class InvertionEvaluationAgent(OGPOAgent):
     """Keep OGPO's original SDE/BON evaluation, changing only its source."""
     base_policy_network: Optional[object] = None
-    base_distribution = DSRLResidualAgent.base_distribution
+    top_distribution: Optional[MPPCA] = None
+
+    def base_distribution(self, observations):
+        if self.top_distribution is not None:
+            batch_shape = observations.shape[:-len(self.config['ob_dims'])]
+            return self.top_distribution.distribution(batch_shape)
+        return DSRLResidualAgent.base_distribution(self, observations)
 
     def sample_actions_with_noise(self, observations, grad_params=None, rng=None,
                                  use_target=True, is_encoded=False, images=None):
@@ -89,6 +96,8 @@ class InvertionEvaluationAgent(OGPOAgent):
 class InvertionOfflineAgent(DSRLResidualAgent):
     """Residual flow training with original offline ODE and SDE/BON evaluation."""
     evaluation_template: Optional[OGPOAgent] = None
+    top_distribution: Optional[MPPCA] = None
+    base_distribution = InvertionEvaluationAgent.base_distribution
 
     @jax.jit
     def bc_update(self, batch):
@@ -139,10 +148,14 @@ class InvertionOfflineAgent(DSRLResidualAgent):
         config = template.config.copy()
         config['noise_dim'] = self.config['noise_dim']
         config['use_one_variance'] = self.config.get('use_one_variance', False)
+        if self.top_distribution is not None:
+            # The existing score correction assumes a diagonal Gaussian source.
+            config['error_correct_sde_to_ode'] = False
         return InvertionEvaluationAgent(
             rng=self.rng, actor_network=template.actor_network.replace(params=params),
             critic_network=self.action_critic_network, config=config,
-            base_policy_network=self.base_policy_network)
+            base_policy_network=self.base_policy_network,
+            top_distribution=self.top_distribution)
 
     @jax.jit
     def sample_actions(self, observations, rng=None):
@@ -176,8 +189,17 @@ def make_inverse_agent(teacher, example, config, seed):
         action_critic_network=teacher.critic_network, evaluation_template=teacher)
 
 
-def train_inverse_encoder(agent, dataset, config, logger, start_step, mesh=None):
-    """Run residual's original inversion and encoder-BC loops, without retraining yet."""
+def train_inverse_encoder(agent, dataset, config, logger, start_step, mesh=None, seed=0):
+    """Invert demos and fit either the conditional encoder or frozen MPPCA."""
+    if config.get('use_top_distribution', False):
+        latents = invert_demo_latents(agent, dataset, config)
+        model, info = fit_mppca(
+            latents, components=config['top_distribution_components'],
+            rank=config['top_distribution_rank'], max_iter=config['top_distribution_max_iter'],
+            tol=config['top_distribution_tol'], seed=seed)
+        logger.log(info, 'inverse_encoder', step=start_step)
+        print(f"Fitted frozen MPPCA source: {info}")
+        return agent.replace(top_distribution=model)
     encoder_logger = SimpleNamespace(log=lambda info, prefix, step:
         logger.log(info, 'inverse_encoder', step=step))
     encoder_config = dict(config, use_normal_base_encoder=False,
@@ -217,7 +239,9 @@ def _start_logging(config, stage):
     exp = config['experiment']
     stage_config = copy.deepcopy(config)
     stage_config['invertion_stage'] = stage
-    stage_config['flow_source_distribution'] = 'inverse_encoder' if stage == 'retrain' else 'normal'
+    stage_config['flow_source_distribution'] = (
+        ('mppca' if config.get('use_top_distribution', False) else 'inverse_encoder')
+        if stage == 'retrain' else 'normal')
     if stage == 'retrain':
         stage_config['evaluation_sampler'] = 'offline_ode_and_sde_bon'
     result = setup_experiment_logging(
@@ -278,6 +302,12 @@ def _parse_launch_args():
         if name in os.environ and key not in overrides:
             _, extra = parse_cli_args([f'--{key}={os.environ[name]}'])
             overrides.update(extra)
+    for key in ('use_top_distribution', 'top_distribution_components',
+                'top_distribution_rank', 'top_distribution_max_iter', 'top_distribution_tol'):
+        name = f'OGPO_INVERTION_{key.upper()}'
+        if name in os.environ and key not in overrides:
+            _, extra = parse_cli_args([f'--{key}={os.environ[name]}'])
+            overrides.update(extra)
     return algo, overrides
 
 
@@ -306,6 +336,22 @@ def main():
         raise ValueError('use_OT_optimization must be true or false')
     if not isinstance(use_top_inversion, bool):
         raise ValueError('use_top_inversion must be true or false')
+    use_top_distribution = config.setdefault('use_top_distribution', False)
+    if not isinstance(use_top_distribution, bool):
+        raise ValueError('use_top_distribution must be true or false')
+    for key, default, minimum in (('top_distribution_components', 2, 1),
+                                 ('top_distribution_rank', 20, 0),
+                                 ('top_distribution_max_iter', 100, 1)):
+        value = config.setdefault(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise ValueError(f'{key} must be an integer >= {minimum}')
+        ac[key] = value
+    tol = config.setdefault('top_distribution_tol', 1e-4)
+    if isinstance(tol, bool) or not isinstance(tol, (int, float)) or not np.isfinite(tol) or tol <= 0:
+        raise ValueError('top_distribution_tol must be finite and positive')
+    ac.update(use_top_distribution=use_top_distribution, top_distribution_tol=tol)
+    if use_top_distribution and use_one_varience:
+        raise ValueError('use_one_varience cannot be combined with use_top_distribution: MPPCA uses fitted covariance')
     ac['use_top_inversion'] = use_top_inversion
     ckpt = config['checkpoint']
     if any(ckpt.get(key) for key in ('resume_path', 'restore_actor_path', 'restore_critic_path')):
@@ -376,7 +422,7 @@ def main():
         agent = make_inverse_agent(agent, example, agent_config, seed)
         if mesh is not None:
             agent = shard_agent(agent, mesh)
-        agent = train_inverse_encoder(agent, dataset, agent_config, logger, teacher_steps, mesh)
+        agent = train_inverse_encoder(agent, dataset, agent_config, logger, teacher_steps, mesh, seed=seed)
         save_agent(agent, save_dir, teacher_steps + agent_config['base_bc_steps'])
         # Flush the preparation row locally, keeping the online run alive.
         logger.close()
@@ -388,7 +434,9 @@ def main():
         np.random.seed(seed)
         agent = agent.replace(config=agent.config.copy(
             dict(use_one_variance=use_one_varience,
-                 use_OT_optimization=use_OT_optimization)))
+                 use_OT_optimization=use_OT_optimization,
+                 error_correct_sde_to_ode=(False if use_top_distribution else
+                     agent.config.get('error_correct_sde_to_ode', False)))))
         agent = agent.reset_flow_for_retraining(example['observations'], example['actions'])
         if mesh is not None:
             agent = shard_agent(agent, mesh)
@@ -397,6 +445,9 @@ def main():
         retrain_config['bc']['clip_bc'] = early_stop
         retrain_config['agent']['use_one_variance'] = use_one_varience
         retrain_config['agent']['use_OT_optimization'] = use_OT_optimization
+        if use_top_distribution:
+            retrain_config['agent']['error_correct_sde_to_ode'] = False
+            print('MPPCA SDE evaluation: Gaussian-only score drift correction disabled')
         save_dir, logger, _ = _start_logging(retrain_config, 'retrain')
         started = time.monotonic()
         agent, step, info = _train_flow(
@@ -412,13 +463,18 @@ def main():
             flow_module='modules_actor_bc_flow',
             flow_params=jax.device_get(agent.bc_flow_network.params),
             base_encoder_params=jax.device_get(agent.base_policy_network.params))
+        if use_top_distribution:
+            payload.update(format='ogpo_invertion_offline_mppca_v1',
+                           source_distribution='mppca',
+                           mppca_params=jax.device_get(agent.top_distribution))
         output = os.path.abspath(os.path.expanduser(output))
         os.makedirs(os.path.dirname(output), exist_ok=True)
         temporary = output + '.tmp'
         with open(temporary, 'wb') as stream:
             pickle.dump(payload, stream)
         os.replace(temporary, output)
-        print(f"Saved encoder + retrained flow to {output}")
+        source_name = 'MPPCA' if use_top_distribution else 'encoder'
+        print(f"Saved {source_name} + retrained flow to {output}")
         print(f"Flow retraining: {step} updates in {time.monotonic() - started:.1f}s; success={info.get('success', 'N/A')}")
     finally:
         _finish_logging(logger)

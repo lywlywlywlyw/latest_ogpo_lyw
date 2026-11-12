@@ -8,6 +8,10 @@ set -euo pipefail
 # --use_top_inversion=True uses invert_flow_actions_top from t=0.95 to 0:
 # 10 explicit-midpoint steps (dt=0.095, NFE=20), independent of flow_steps.
 # use_top_inversion defaults to false.
+# --use_top_distribution=TRUE fits a frozen task-level MPPCA source (2 components,
+# rank min(20, noise_dim - 1)) instead of the observation-conditioned encoder.
+# Optional: --top_distribution_components=2 --top_distribution_rank=20
+# --top_distribution_max_iter=100 --top_distribution_tol=0.0001
 # use_OT_optimization defaults to false; stage 3 selects the closest of 10
 # encoder latents to each demo action (Euclidean distance).
 TASK="${1:?Usage: train_invertion.sh square|transport|toolhang [--key=value]}"
@@ -37,6 +41,12 @@ for arg in "$@"; do
       export OGPO_INVERTION_USE_OT_OPTIMIZATION="${arg#*=}" ;;
     --use_OT_optimization)
       export OGPO_INVERTION_USE_OT_OPTIMIZATION=true ;;
+    --use_top_distribution=*|--top_distribution_components=*|--top_distribution_rank=*|--top_distribution_max_iter=*|--top_distribution_tol=*)
+      key="${arg%%=*}"
+      key="${key#--}"
+      export "OGPO_INVERTION_${key^^}=${arg#*=}" ;;
+    --use_top_distribution)
+      export OGPO_INVERTION_USE_TOP_DISTRIBUTION=true ;;
     --use_top_inversion=*)
       export OGPO_INVERTION_USE_TOP_INVERSION="${arg#*=}" ;;
     --use_top_inversion)

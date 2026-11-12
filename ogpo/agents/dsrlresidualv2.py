@@ -178,6 +178,8 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
         q = jnp.min(qs, axis=0) if self.config['q_agg'] == 'min' else jnp.mean(qs, axis=0)
         base = self.base_distribution(batch['observations'])
         delta = dist.mean() - jax.lax.stop_gradient(base.mean())
+        use_normal_kl = self.config.get('use_normal_kl', False)
+        kl_delta = dist.mean() if use_normal_kl else delta
         multiplier = self.actor_network.select('kl_multiplier')()
         # SAC uses the complete base-plus-residual Gaussian, summed over its
         # latent action dimensions. Keep temperature and actor gradients separate.
@@ -191,13 +193,14 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
             entropy = -jax.lax.stop_gradient(log_probs).mean()
             temp_loss = temp_param * (entropy - self.config['target_entropy'])
         use_kl_loss = self.config.get('use_kl_loss', True)
-        # KL(pi || base): sum over latent dimensions, then average over states.
+        # The active constraint penalizes mean distance to base.mean(), or to
+        # zero when use_normal_kl is enabled; variance terms remain diagnostics.
         # Monitor both components even when regularization is disabled.
         log_std = jnp.log(dist.stddev())
         log_ratio = log_std - jnp.log(base.stddev())
-        kl_mean = (0.5 * jnp.sum(jnp.square(delta / base.stddev()), axis=-1)).mean()
+        kl_mean = (0.5 * jnp.sum(jnp.square(kl_delta / base.stddev()), axis=-1)).mean()
         kl_std = (0.5 * jnp.sum(jnp.expm1(2 * log_ratio) - 2 * log_ratio, axis=-1)).mean()
-        kl = (0.5 * jnp.sum(jnp.square(delta), axis=-1)).mean()#kl_mean + kl_std
+        kl = (0.5 * jnp.sum(jnp.square(kl_delta), axis=-1)).mean()
         log_std_min = self.config['online_log_std_min']
         log_std_max = self.config['online_log_std_max']
         clip_enabled = log_std_min is not None and log_std_max is not None
@@ -233,6 +236,7 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
             'variable_klepsilon_enabled': jnp.float32(self.config.get('use_variable_klepsilon', False)),
             'kl_constraint_gap': kl - kl_epsilon,
             'kl': kl, 'kl_enabled': jnp.float32(use_kl_loss),
+            'normal_kl_enabled': jnp.float32(use_normal_kl),
             'kl_mean': kl_mean, 'kl_std': kl_std,
             'kl_multiplier': multiplier, 'dual_loss': dual_loss,
             'log_probs_mean': log_probs.mean(), 'entropy': -log_probs.mean(),
@@ -526,6 +530,9 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
         config.setdefault('use_one_variance', False)
         config.setdefault('use_base_distribution_in_qdistill', False)
         config.setdefault('use_kl_loss', True)
+        config.setdefault('use_normal_kl', False)
+        if not isinstance(config['use_normal_kl'], bool):
+            raise ValueError('use_normal_kl must be true or false')
         config.setdefault('use_actor_entropy', False)
         config.setdefault('use_serl_target_entropy', False)
         config.setdefault('use_low_target_entropy', False)

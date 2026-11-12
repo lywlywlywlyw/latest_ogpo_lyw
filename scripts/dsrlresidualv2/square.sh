@@ -50,6 +50,7 @@ use_variable_klepsilon=""
 kl_lowest_value=""
 kl_highest_value=""
 use_kl_loss=true
+use_normal_kl=""  # Empty: use YAML default (false); override with --use_normal_kl=True
 use_actor_entropy=false
 use_serl_target_entropy=false
 use_low_target_entropy=false  # With actor entropy enabled, overrides the SERL target
@@ -113,7 +114,7 @@ done
 
 # Preserve YAML defaults unless the user explicitly overrides these knobs.
 variable_kl_args=()
-for key in use_variable_klepsilon kl_lowest_value kl_highest_value; do
+for key in use_variable_klepsilon kl_lowest_value kl_highest_value use_normal_kl; do
     if [[ -n "${!key}" ]]; then
         variable_kl_args+=("--agent.$key=${!key}")
     fi

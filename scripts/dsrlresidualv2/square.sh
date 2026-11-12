@@ -45,6 +45,10 @@ use_top_inversion=false
 use_one_variance=false
 use_base_distribution_in_qdistill=false
 kl_epsilon=0.1
+# Empty: inherit YAML; explicit CLI overrides are forwarded below.
+use_variable_klepsilon=""
+kl_lowest_value=""
+kl_highest_value=""
 use_kl_loss=true
 use_actor_entropy=false
 use_serl_target_entropy=false
@@ -105,6 +109,14 @@ for arg in "$@"; do
       exit 1
       ;;
   esac
+done
+
+# Preserve YAML defaults unless the user explicitly overrides these knobs.
+variable_kl_args=()
+for key in use_variable_klepsilon kl_lowest_value kl_highest_value; do
+    if [[ -n "${!key}" ]]; then
+        variable_kl_args+=("--agent.$key=${!key}")
+    fi
 done
 
 # Preserve the actor budget; default to twice as many critic updates.
@@ -197,6 +209,7 @@ echo "=== DSRLResidualV2 Square | seed=$seed ==="
     --agent.use_serl_target_entropy=$use_serl_target_entropy \
     --agent.use_low_target_entropy=$use_low_target_entropy \
     --agent.kl_epsilon=$kl_epsilon \
+    "${variable_kl_args[@]}" \
     --agent.use_kl_loss=$use_kl_loss \
     --agent.init_kl_multiplier=$init_kl_multiplier \
     --agent.online_log_std_min=$online_log_std_min \

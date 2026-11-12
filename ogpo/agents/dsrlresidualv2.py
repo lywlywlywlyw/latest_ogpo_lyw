@@ -1,4 +1,5 @@
 import copy
+import math
 from functools import partial
 from typing import Any, Tuple
 
@@ -27,6 +28,20 @@ from ogpo.agents.modules.q_helper import (
 from ogpo.agents.modules.pg_helper import (
     sample_flow_actions_ode,
 )
+
+def kl_epsilon_at_step(config, online_env_step=0):
+    """Budget on the online environment clock, independent of offline BC and UTD.
+
+    Hold the anchor for 100k environment steps, then use a half-cosine ramp
+    through 500k. No mutable schedule state is needed when resuming a run.
+    """
+    if not config.get('use_variable_klepsilon', False):
+        return jnp.float32(config.get('kl_epsilon', 0.1))
+    low = config.get('kl_lowest_value', 1.0)
+    high = config.get('kl_highest_value', 4.0)
+    progress = jnp.clip((jnp.asarray(online_env_step, dtype=jnp.float32) - 100000.) / 400000., 0., 1.)
+    return low + (high - low) * 0.5 * (1. - jnp.cos(jnp.pi * progress))
+
 
 class ResidualMeanStd(nn.Module):
     """Zero-initialized residuals for the mean and log standard deviation."""
@@ -156,7 +171,7 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
             loc=base.mean() + delta_mean,
             scale_diag=jnp.exp(log_std))
 
-    def actor_loss(self, batch, grad_params, rng):
+    def actor_loss(self, batch, grad_params, rng, online_env_step=0):
         dist = self.policy_distribution(batch['observations'], params=grad_params)
         z, log_probs = dist.sample_and_log_prob(seed=rng)
         qs = self.critic_network.select('critic')(batch['observations'], actions=z)
@@ -198,14 +213,15 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
             std_info[f'online_log_std_dim_{i}'] = log_std[..., i].mean()
             std_info[f'online_log_std_lower_bound_ratio_dim_{i}'] = at_lower[..., i].mean()
             std_info[f'online_log_std_upper_bound_ratio_dim_{i}'] = at_upper[..., i].mean()
+        kl_epsilon = kl_epsilon_at_step(self.config, online_env_step)
         dual_loss = jnp.float32(0.0)
         constrained_loss = actor_loss
         if use_kl_loss:
-            constrained_loss = actor_loss + multiplier * (kl - self.config['kl_epsilon'])
+            constrained_loss = actor_loss + multiplier * (kl - kl_epsilon)
             # Dual descent increases lambda when KL exceeds epsilon. Stop gradients
             # on both sides so actor and dual receive their respective objectives.
             dual = self.actor_network.select('kl_multiplier')(params=grad_params)
-            dual_loss = dual * jax.lax.stop_gradient(self.config['kl_epsilon'] - kl)
+            dual_loss = dual * jax.lax.stop_gradient(kl_epsilon - kl)
         total_loss = constrained_loss + dual_loss + temp_loss
         return total_loss, {
             **std_info,
@@ -213,6 +229,9 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
             'actor_entropy_enabled': jnp.float32(use_actor_entropy),
             'temp': temp, 'temp_loss': temp_loss,
             'target_entropy': jnp.float32(self.config['target_entropy']),
+            'kl_epsilon': kl_epsilon,
+            'variable_klepsilon_enabled': jnp.float32(self.config.get('use_variable_klepsilon', False)),
+            'kl_constraint_gap': kl - kl_epsilon,
             'kl': kl, 'kl_enabled': jnp.float32(use_kl_loss),
             'kl_mean': kl_mean, 'kl_std': kl_std,
             'kl_multiplier': multiplier, 'dual_loss': dual_loss,
@@ -262,8 +281,8 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
         state = TrainState.create(network.model_def, params, network.tx)
         return self.replace(rng=rng, bc_flow_network=state)
 
-    def actor_total_loss(self, batch, grad_params, rng):
-        a_loss, a_info = self.actor_loss(batch, grad_params, rng)
+    def actor_total_loss(self, batch, grad_params, rng, online_env_step=0):
+        a_loss, a_info = self.actor_loss(batch, grad_params, rng, online_env_step)
         info = {f'actor/{k}': v for k, v in a_info.items()}
         return a_loss, info
 
@@ -310,11 +329,11 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
         network.params[f'modules_target_{module_name}'] = new_target_params
 
     @staticmethod
-    def _update(agent, batch: dict) -> Tuple['DSRLResidualV2Agent', dict]:
+    def _update(agent, batch: dict, online_env_step=0) -> Tuple['DSRLResidualV2Agent', dict]:
         new_rng, rng1, rng2 = jax.random.split(agent.rng, 3)
 
         def actor_loss_fn(p):
-            return agent.actor_total_loss(batch, p, rng1)
+            return agent.actor_total_loss(batch, p, rng1, online_env_step)
         new_actor_state, actor_info = agent.actor_network.apply_loss_fn(actor_loss_fn)
 
         agent, action_info = agent._action_step(batch, rng2)
@@ -341,8 +360,10 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
         return self._update_offline(self, batch, use_base_distribution)
 
     @jax.jit
-    def batch_update(self, batch, batch_success=None, success_flag=False):
-        agent, infos = jax.lax.scan(self._update, self, batch)
+    def batch_update(self, batch, batch_success=None, success_flag=False, online_env_step=0):
+        # Every UTD minibatch at this collection step uses the same budget.
+        agent, infos = jax.lax.scan(
+            lambda agent, minibatch: self._update(agent, minibatch, online_env_step), self, batch)
         return agent, jax.tree_util.tree_map(lambda x: x.mean(), infos)
 
     @staticmethod
@@ -509,6 +530,13 @@ class DSRLResidualV2Agent(flax.struct.PyTreeNode):
         config.setdefault('use_serl_target_entropy', False)
         config.setdefault('use_low_target_entropy', False)
         config.setdefault('kl_epsilon', 0.1)
+        config.setdefault('use_variable_klepsilon', False)
+        config.setdefault('kl_lowest_value', 1.0)
+        config.setdefault('kl_highest_value', 4.0)
+        if config['use_variable_klepsilon']:
+            low, high = config['kl_lowest_value'], config['kl_highest_value']
+            if not (math.isfinite(low) and math.isfinite(high) and 0 < low <= high):
+                raise ValueError('Variable KL requires finite 0 < kl_lowest_value <= kl_highest_value')
         config.setdefault('init_kl_multiplier', 1.0)
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng, 2)

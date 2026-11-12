@@ -17,7 +17,11 @@ agent:
   use_serl_target_entropy: false  # With actor entropy enabled, use target_entropy = -noise_dim / 2
   use_low_target_entropy: false  # With actor entropy enabled, use -2 * noise_dim; overrides use_serl_target_entropy
   use_kl_loss: true           # Enable actor KL regularization and dual loss
-  kl_epsilon: 0.1              # KL budget summed over latent dimensions
+  kl_epsilon: 0.1              # Fixed budget when use_variable_klepsilon=false
+  use_variable_klepsilon: false # True: use the bounds below, ignoring fixed kl_epsilon
+  kl_lowest_value: 1.0         # Hold through 100k ONLINE environment steps
+  kl_highest_value: 4.0        # Half-cosine ramp from 100k to 500k; then hold this value
+  # Applies to the current 0.5 * E[||mu - mu_base||^2] constraint, not full Gaussian KL.
   init_kl_multiplier: 1.0
   noise_chunk_length: -1
   entropy_backup: false

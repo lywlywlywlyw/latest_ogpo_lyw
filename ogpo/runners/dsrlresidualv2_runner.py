@@ -433,16 +433,20 @@ def run_dsrlresidualv2_online_rl(
                         except ValueError:
                             success_flag = False
 
+                # Use actual collected environment steps, including warmup and
+                # restored progress; offline BC and extra critic updates do not advance it.
+                schedule_kwargs = ({'online_env_step': jnp.asarray(total_env_step, dtype=jnp.int32)}
+                                   if config.get('use_variable_klepsilon', False) else {})
                 if split_utd:
                     joint = jax.tree.map(lambda x: x[:eff_utd_pi], batch)
                     agent, update_info["online_agent"] = agent.batch_update(
-                        _maybe_shard(joint), _maybe_shard(batch_success), success_flag)
+                        _maybe_shard(joint), _maybe_shard(batch_success), success_flag, **schedule_kwargs)
                     extra = jax.tree.map(lambda x: x[eff_utd_pi:], batch)
                     agent, critic_info = agent.batch_critic_only_update(_maybe_shard(extra))
                     update_info["online_agent"].update(critic_info)
                 else:
                     agent, update_info["online_agent"] = agent.batch_update(
-                        _maybe_shard(batch), _maybe_shard(batch_success), success_flag)
+                        _maybe_shard(batch), _maybe_shard(batch_success), success_flag, **schedule_kwargs)
             if force_jax_sync:
                 jax.block_until_ready(agent)
             if log_interval > 0 and update_info and (

@@ -52,6 +52,7 @@ use_base_distribution_in_qdistill=false
 use_restrain_loss=true
 restrain_threshold=0.35  # Expected L2 norm of sampled residual latent
 use_actor_entropy=false
+target_entropy_value=null  # Explicit target; null/None keeps the default low/SERL logic
 use_serl_target_entropy=false
 use_low_target_entropy=false  # With actor entropy enabled, overrides the SERL target
 init_restrain_multiplier=1.0
@@ -207,6 +208,7 @@ echo "=== DSRLResidualV3 Square | seed=$seed ==="
     --agent.use_top_inversion=$use_top_inversion \
     --agent.use_base_distribution_in_qdistill=$use_base_distribution_in_qdistill \
     --agent.use_actor_entropy=$use_actor_entropy \
+    --agent.target_entropy_value=$target_entropy_value \
     --agent.use_serl_target_entropy=$use_serl_target_entropy \
     --agent.use_low_target_entropy=$use_low_target_entropy \
     "${optional_agent_args[@]}" \

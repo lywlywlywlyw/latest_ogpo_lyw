@@ -18,6 +18,7 @@ agent:
   online_log_std_min: null #-10.0
   online_log_std_max: null #0.0
   use_actor_entropy: false  # SAC on the conditional residual Gaussian only; default target = -noise_dim
+  target_entropy_value: null  # Explicit target overrides low/SERL logic; null keeps existing defaults
   use_serl_target_entropy: false  # With actor entropy enabled, use target_entropy = -noise_dim / 2
   use_low_target_entropy: false  # With actor entropy enabled, use -2 * noise_dim; overrides use_serl_target_entropy
   use_restrain_loss: true     # Enable the residual L2 constraint and its dual loss

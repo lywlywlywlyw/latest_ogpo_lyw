@@ -509,6 +509,14 @@ class DSRLResidualV3Agent(flax.struct.PyTreeNode):
         config.setdefault('use_actor_entropy', False)
         config.setdefault('use_serl_target_entropy', False)
         config.setdefault('use_low_target_entropy', False)
+        config.setdefault('target_entropy_value', None)
+        target_entropy_value = config['target_entropy_value']
+        if target_entropy_value is not None:
+            if (isinstance(target_entropy_value, bool)
+                    or not isinstance(target_entropy_value, (int, float))
+                    or not math.isfinite(target_entropy_value)):
+                raise ValueError('target_entropy_value must be a finite number or null')
+            config['target_entropy_value'] = float(target_entropy_value)
         config.setdefault('use_top_distribution', False)
         if not isinstance(config['use_top_distribution'], bool):
             raise ValueError('use_top_distribution must be true or false')
@@ -689,7 +697,9 @@ class DSRLResidualV3Agent(flax.struct.PyTreeNode):
 
         # Residual entropy sums over the full latent chunk (e.g. Square: 7 * 4).
         config['target_entropy'] = -float(noise_dim)
-        if config['use_actor_entropy']:
+        if config['target_entropy_value'] is not None:
+            config['target_entropy'] = config['target_entropy_value']
+        elif config['use_actor_entropy']:
             if config['use_low_target_entropy']:
                 config['target_entropy'] *= 2
             elif config['use_serl_target_entropy']:

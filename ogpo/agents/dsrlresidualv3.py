@@ -164,7 +164,11 @@ class DSRLResidualV3Agent(flax.struct.PyTreeNode):
         base_latent = jax.lax.stop_gradient(base_latent)
         dist = self.residual_distribution(observations, base_latent, params=params)
         residual = dist.mean() if deterministic else dist.sample(seed=residual_rng)
-        return base_latent + residual, base_latent, residual, dist
+        latent = base_latent + residual
+        limit = self.config.get('latent_hard_clip')
+        if limit is not None:
+            latent = jnp.clip(latent, -limit, limit)
+        return latent, base_latent, residual, dist
 
     def actor_loss(self, batch, grad_params, rng):
         z, base_latent, residual, dist = self._sample_latents(
@@ -505,6 +509,13 @@ class DSRLResidualV3Agent(flax.struct.PyTreeNode):
         config.setdefault('restrain_threshold', 0.35)
         config.setdefault('init_restrain_multiplier', 1.0)
         config.setdefault('residual_init_std', 1.0)
+        config.setdefault('latent_hard_clip', None)
+        limit = config['latent_hard_clip']
+        if limit is not None:
+            if (isinstance(limit, bool) or not isinstance(limit, (int, float))
+                    or not math.isfinite(limit) or limit < 0):
+                raise ValueError('latent_hard_clip must be a finite nonnegative number or null')
+            config['latent_hard_clip'] = float(limit)
         for key in ('restrain_threshold', 'init_restrain_multiplier', 'residual_init_std'):
             value = config[key]
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:

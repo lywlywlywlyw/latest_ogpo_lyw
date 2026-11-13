@@ -15,6 +15,7 @@ agent:
   invertionencoder_retrainflow_steps: null  # null: task default steps/early stopping (Square/ToolHang 500k, Transport 1M); explicit steps: no early stopping
   base_bc_steps: 100000
   residual_init_std: 1.0  # Initial per-coordinate residual std (>0); subject to log-std bounds
+  latent_hard_clip: null  # Elementwise clip of base + residual to [-value, value]; null disables
   # Clip residual log standard deviation when both bounds are set.
   online_log_std_min: null #-10.0
   online_log_std_max: null #0.0

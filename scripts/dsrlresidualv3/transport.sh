@@ -52,6 +52,7 @@ use_base_distribution_in_qdistill=false
 use_restrain_loss=true
 restrain_threshold=0.35  # Expected L2 norm of sampled residual latent
 residual_init_std=1.0  # Initial per-coordinate residual std; try 0.02 for small noise
+latent_hard_clip=null  # Elementwise bound on final base + residual latent; null disables
 use_actor_entropy=false
 target_entropy_value=null  # Explicit target; null/None keeps the default low/SERL logic
 use_serl_target_entropy=false
@@ -214,6 +215,7 @@ echo "=== DSRLResidualV3 Transport | seed=$seed ==="
     --agent.use_restrain_loss=$use_restrain_loss \
     --agent.restrain_threshold=$restrain_threshold \
     --agent.residual_init_std=$residual_init_std \
+    --agent.latent_hard_clip=$latent_hard_clip \
     --agent.init_restrain_multiplier=$init_restrain_multiplier \
     --agent.online_log_std_min=$online_log_std_min \
     --agent.online_log_std_max=$online_log_std_max \

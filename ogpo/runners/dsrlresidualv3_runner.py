@@ -4,7 +4,6 @@ Retains DSRL-NA chunk replay, critic updates and split UTD scheduling.
 """
 
 from types import SimpleNamespace
-from functools import partial
 from typing import Any, Dict, Optional, Tuple
 
 import jax
@@ -150,13 +149,15 @@ def run_residualv3_base_pretraining(agent, train_dataset, config, logger, start_
             if should_log:
                 logger.log(dict(info, retrain_step=i), 'offline_flow', step=log_step)
             if i % eval_interval == 0 or i == retrain_steps:
+                # Match the standalone retrain phase's ODE policy and local
+                # evaluation seed clock; keep W&B's global log step unchanged.
                 eval_info = _run_evaluation(
                     agent, eval_env, eval_envs, eval_flags, action_dim,
-                    partial(agent.sample_base_actions, num_samples=8), log_step,
+                    agent.sample_offline_flow_actions, i,
                     eval_episodes, 0, 3, env_name, plot=False)
                 logger.log(dict(eval_info, retrain_step=i), 'offline_eval', step=log_step)
                 success = eval_info.get('success', 0.)
-                print(f'Flow retraining step={i}: Best-of-8 success={success:.4f}')
+                print(f'Flow retraining step={i}: single-sample ODE success={success:.4f}')
                 if early_stop and success >= 0.5:
                     save_agent(agent, save_dir, log_step)
                     break

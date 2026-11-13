@@ -85,7 +85,7 @@ def test_retrain_budget_and_success_early_stop(monkeypatch, budget, expected_upd
             assert use_base_distribution
             calls.append(True)
             return self, {}
-        def sample_base_actions(self, *args, **kwargs):
+        def sample_offline_flow_actions(self, *args, **kwargs):
             raise AssertionError('Evaluation is mocked')
     monkeypatch.setattr(runner, '_run_evaluation', lambda *a, **k: {'success': 1.})
     monkeypatch.setattr(runner, 'save_agent', lambda *a, **k: None)

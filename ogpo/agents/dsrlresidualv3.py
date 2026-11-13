@@ -417,6 +417,17 @@ class DSRLResidualV3Agent(flax.struct.PyTreeNode):
         agent, infos = jax.lax.scan(self._critic_only_update, self, batch)
         return agent, jax.tree.map(lambda x: x.mean(), infos)
 
+    @jax.jit
+    def sample_offline_flow_actions(self, observations, rng=None):
+        """Single-source-sample ODE, matching train_invertion_offline eval/success.
+
+        Use the fitted source directly: no residual, online latent boxing, or
+        critic-based candidate selection enters the offline flow evaluation.
+        """
+        rng = self.rng if rng is None else rng
+        noises = self.base_distribution(observations).sample(seed=rng)
+        return self.compute_flow_actions(observations, noises=noises, rng=rng)
+
     @partial(jax.jit, static_argnames=('num_samples',))
     def sample_base_actions(self, observations, rng=None, num_samples=1):
         """Frozen-base Flow evaluation; Best-of-N follows OGPO's action-Q rule."""

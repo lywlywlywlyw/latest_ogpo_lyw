@@ -50,9 +50,9 @@ top_distribution_tol=""
 use_base_distribution_in_qdistill=false
 # Empty: inherit YAML; explicit CLI overrides are forwarded below.
 use_restrain_loss=true
-restrain_threshold=0.35  # Expected L2 norm of sampled residual latent
+restrain_threshold=0.35  # Expected sum(actual displacement ** 2) / noise_dim
 residual_init_std=1.0  # Initial per-coordinate residual std; try 0.02 for small noise
-latent_hard_clip=null  # Elementwise bound on final base + residual latent; null disables
+latent_hard_clip=null  # Box base; value*tanh proposal; shared-alpha LPDS projection
 use_actor_entropy=false
 target_entropy_value=null  # Explicit target; null/None keeps the default low/SERL logic
 use_serl_target_entropy=false

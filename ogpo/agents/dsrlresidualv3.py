@@ -14,6 +14,7 @@ from ogpo.agents.modules.mppca import MPPCA
 from ogpo.networks.encoders import encoder_modules
 from ogpo.agents.modules.flax_utils import ModuleDict, TrainState, nonpytree_field
 from ogpo.networks import Actor, Value, ActorVectorField, LogParam
+from ogpo.networks.modules import TanhMultivariateNormalDiag
 from ogpo.networks.modules.time_embedding import SinusoidalTimeEmbedding
 from ogpo.agents.modules.igp_targets_helper import get_flow_targets
 from ogpo.agents.modules.maintenance import (
@@ -29,6 +30,16 @@ from ogpo.agents.modules.q_helper import (
 from ogpo.agents.modules.pg_helper import (
     sample_flow_actions_ode,
 )
+
+def _box_safe_step_global(base_latent, proposal, limit):
+    """LPDS-style shared step length, preserving the proposed direction."""
+    base_latent = jnp.clip(base_latent, -limit, limit)
+    available = jnp.where(proposal > 0, limit - base_latent, limit + base_latent)
+    denominator = jnp.maximum(jnp.abs(proposal), 1e-12)
+    bounds = jnp.where(proposal != 0, available / denominator, jnp.inf)
+    alpha = jnp.clip(jnp.min(bounds, axis=-1, keepdims=True), 0., 1.)
+    return base_latent + alpha * proposal, alpha
+
 
 class ResidualMeanStd(nn.Module):
     """Conditional residual Gaussian with zero mean and configurable initial std."""
@@ -73,8 +84,8 @@ class DSRLResidualV3Agent(flax.struct.PyTreeNode):
 
     def _action_td_target(self, batch, rng):
         """Bootstrap through the frozen decoder and target action critic."""
-        next_z, _, residual, dist = self._sample_latents(batch['next_observations'], rng)
-        log_probs = dist.log_prob(residual)
+        next_z, _, _, _, log_probs = self._sample_latents(
+            batch['next_observations'], rng, with_log_prob=True)
         next_actions = self.noise_to_actions_public(batch['next_observations'], next_z)
         next_qs = self.action_critic_network.select('target_critic')(
             batch['next_observations'], actions=next_actions)
@@ -117,6 +128,9 @@ class DSRLResidualV3Agent(flax.struct.PyTreeNode):
             z = jax.random.normal(
                 rng, (observations.shape[0], self.config['noise_dim']),
                 dtype=observations.dtype)
+        limit = self.config.get('latent_hard_clip')
+        if limit is not None:
+            z = jnp.clip(z, -limit, limit)
         actions = self.noise_to_actions_public(observations, z)
         target_q = jax.lax.stop_gradient(
             self.action_critic_network.select('critic')(observations, actions=actions))
@@ -148,37 +162,61 @@ class DSRLResidualV3Agent(flax.struct.PyTreeNode):
         return distrax.MultivariateNormalDiag(loc=mean, scale_diag=std)
 
     def residual_distribution(self, observations, base_latent, params=None):
-        """Residual Gaussian conditioned on the sampled frozen base latent."""
+        """Pre-projection residual proposal, optionally tanh-squashed and rescaled."""
+        limit = self.config.get('latent_hard_clip')
+        if limit is not None:
+            base_latent = jnp.clip(base_latent, -limit, limit)
         mean, log_std = self.actor_network.select('actor')(
             observations, jax.lax.stop_gradient(base_latent), params=params)
         low, high = self.config['online_log_std_min'], self.config['online_log_std_max']
         if low is not None and high is not None:
             log_std = jnp.clip(log_std, low, high)
-        return distrax.MultivariateNormalDiag(loc=mean, scale_diag=jnp.exp(log_std))
+        dist = distrax.MultivariateNormalDiag(loc=mean, scale_diag=jnp.exp(log_std))
+        if limit is not None:
+            dist = TanhMultivariateNormalDiag(
+                dist, low=-jnp.asarray(limit), high=jnp.asarray(limit))
+        return dist
 
-    def _sample_latents(self, observations, rng, params=None, deterministic=False):
+    def _sample_latents(self, observations, rng, params=None, deterministic=False,
+                        with_log_prob=False):
         base_rng, residual_rng = jax.random.split(rng)
         base = self.base_distribution(observations)
-        # Deterministic evaluation uses the base mean and conditional residual mean.
+        # Deterministic evaluation uses the base mean and the transformed Gaussian mode.
         base_latent = base.mean() if deterministic else base.sample(seed=base_rng)
-        base_latent = jax.lax.stop_gradient(base_latent)
-        dist = self.residual_distribution(observations, base_latent, params=params)
-        residual = dist.mean() if deterministic else dist.sample(seed=residual_rng)
-        latent = base_latent + residual
         limit = self.config.get('latent_hard_clip')
         if limit is not None:
-            latent = jnp.clip(latent, -limit, limit)
+            base_latent = jnp.clip(base_latent, -limit, limit)
+        base_latent = jax.lax.stop_gradient(base_latent)
+        dist = self.residual_distribution(observations, base_latent, params=params)
+        if deterministic:
+            residual = dist.mode()
+            log_probs = dist.log_prob(residual) if with_log_prob else None
+        elif with_log_prob:
+            # Joint sampling avoids inverse-tanh infinities at saturated samples.
+            residual, log_probs = dist.sample_and_log_prob(seed=residual_rng)
+        else:
+            residual = dist.sample(seed=residual_rng)
+        if limit is None:
+            latent = base_latent + residual
+        else:
+            # dist/log_probs describe the tanh proposal. Projection is generally
+            # non-invertible, so it does not define a transformed Gaussian density.
+            latent, _ = _box_safe_step_global(base_latent, residual, limit)
+            residual = latent - base_latent  # Actual displacement for the cost.
+        if with_log_prob:
+            return latent, base_latent, residual, dist, log_probs
         return latent, base_latent, residual, dist
 
     def actor_loss(self, batch, grad_params, rng):
-        z, base_latent, residual, dist = self._sample_latents(
-            batch['observations'], rng, params=grad_params)
-        log_probs = dist.log_prob(residual)
+        z, base_latent, residual, dist, log_probs = self._sample_latents(
+            batch['observations'], rng, params=grad_params, with_log_prob=True)
         qs = self.critic_network.select('critic')(batch['observations'], actions=z)
         q = jnp.min(qs, axis=0) if self.config['q_agg'] == 'min' else jnp.mean(qs, axis=0)
-        # Exact entropy of p(z_residual | observation, sampled z_base), averaged
-        # over states/base samples. The frozen base entropy never enters SAC.
-        entropy = dist.entropy().mean()
+        # Entropy regularizes the pre-projection proposal, not the singular
+        # distribution after the LPDS projection. Keep the tanh Jacobian and
+        # scale correction; preserve exact Gaussian entropy when disabled.
+        squashed = self.config.get('latent_hard_clip') is not None
+        entropy = -log_probs.mean() if squashed else dist.entropy().mean()
         use_actor_entropy = self.config.get('use_actor_entropy', False)
         temp = self.actor_network.select('temp')()
         actor_loss = -q.mean()
@@ -187,9 +225,10 @@ class DSRLResidualV3Agent(flax.struct.PyTreeNode):
             actor_loss -= jax.lax.stop_gradient(temp) * entropy
             temp_param = self.actor_network.select('temp')(params=grad_params)
             temp_loss = temp_param * (jax.lax.stop_gradient(entropy) - self.config['target_entropy'])
-        # A Monte Carlo estimate of E[||z_residual||_2], NOT its squared norm
-        # or the norm of its mean. Sampling keeps the variance constrained too.
-        restrain_loss = jnp.linalg.norm(residual, axis=-1).mean()
+        # LPDS-style cost: squared ACTUAL displacement per latent coordinate,
+        # measured from the boxed base after the shared-alpha projection.
+        restrain_loss = jnp.mean(
+            jnp.sum(jnp.square(residual), axis=-1) / self.config['noise_dim'])
         threshold = jnp.float32(self.config['restrain_threshold'])
         multiplier = self.actor_network.select('restrain_multiplier')()
         enabled = self.config.get('use_restrain_loss', True)
@@ -199,7 +238,14 @@ class DSRLResidualV3Agent(flax.struct.PyTreeNode):
             dual = self.actor_network.select('restrain_multiplier')(params=grad_params)
             dual_loss = dual * jax.lax.stop_gradient(threshold - restrain_loss)
         total_loss = constrained_loss + dual_loss + temp_loss
-        log_std = jnp.log(dist.stddev())
+        # Gaussian parameter diagnostics remain in pre-tanh coordinates.
+        gaussian = dist.distribution if squashed else dist
+        log_std = jnp.log(gaussian.stddev())
+        residual_mode = dist.mode()
+        if squashed:
+            mode_latent, _ = _box_safe_step_global(
+                base_latent, residual_mode, self.config['latent_hard_clip'])
+            residual_mode = mode_latent - base_latent
         low, high = self.config['online_log_std_min'], self.config['online_log_std_max']
         clipping = low is not None and high is not None
         lower = log_std <= low if clipping else jnp.zeros_like(log_std, dtype=bool)
@@ -215,7 +261,10 @@ class DSRLResidualV3Agent(flax.struct.PyTreeNode):
             'restrain_multiplier': multiplier, 'dual_loss': dual_loss,
             'log_probs_mean': log_probs.mean(), 'entropy': entropy,
             'residual_entropy': entropy, 'q_actor_mean': q.mean(),
-            'residual_mean': dist.mean().mean(), 'residual_std_mean': dist.stddev().mean(),
+            'residual_mean': gaussian.mean().mean(), 'residual_std_mean': gaussian.stddev().mean(),
+            'residual_mode_mean': residual_mode.mean(),
+            'entropy_is_proposal': jnp.float32(squashed),
+            'residual_tanh_squash_enabled': jnp.float32(squashed),
             'base_latent_mean': base_latent.mean(), 'final_latent_mean': z.mean(),
             'online_log_std_clip_enabled': jnp.float32(clipping),
             'online_log_std_mean': log_std.mean(),
@@ -378,6 +427,9 @@ class DSRLResidualV3Agent(flax.struct.PyTreeNode):
         repeated = jnp.repeat(observations, num_samples, axis=0)
         _, sample_rng = jax.random.split(rng)
         z = self.base_distribution(repeated).sample(seed=sample_rng)
+        limit = self.config.get('latent_hard_clip')
+        if limit is not None:
+            z = jnp.clip(z, -limit, limit)
         actions = self.noise_to_actions_public(repeated, z)
         if num_samples > 1:
             qs = self.action_critic_network.select('target_critic')(repeated, actions=actions)
@@ -418,6 +470,9 @@ class DSRLResidualV3Agent(flax.struct.PyTreeNode):
                     (self.config['horizon_length'] if self.config["action_chunking"] else 1),
             ),
         )
+        limit = self.config.get('latent_hard_clip')
+        if limit is not None:
+            noises = jnp.clip(noises, -limit, limit)
         actions = self.compute_flow_actions(observations, noises)
         return actions
 
@@ -513,8 +568,8 @@ class DSRLResidualV3Agent(flax.struct.PyTreeNode):
         limit = config['latent_hard_clip']
         if limit is not None:
             if (isinstance(limit, bool) or not isinstance(limit, (int, float))
-                    or not math.isfinite(limit) or limit < 0):
-                raise ValueError('latent_hard_clip must be a finite nonnegative number or null')
+                    or not math.isfinite(limit) or limit <= 0):
+                raise ValueError('latent_hard_clip must be a finite positive number or null')
             config['latent_hard_clip'] = float(limit)
         for key in ('restrain_threshold', 'init_restrain_multiplier', 'residual_init_std'):
             value = config[key]

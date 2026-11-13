@@ -15,16 +15,16 @@ agent:
   invertionencoder_retrainflow_steps: null  # null: task default steps/early stopping (Square/ToolHang 500k, Transport 1M); explicit steps: no early stopping
   base_bc_steps: 100000
   residual_init_std: 1.0  # Initial per-coordinate residual std (>0); subject to log-std bounds
-  latent_hard_clip: null  # Elementwise clip of base + residual to [-value, value]; null disables
+  latent_hard_clip: null  # Box base to +/-value; value*tanh proposal then shared-alpha LPDS projection
   # Clip residual log standard deviation when both bounds are set.
   online_log_std_min: null #-10.0
   online_log_std_max: null #0.0
-  use_actor_entropy: false  # SAC on the conditional residual Gaussian only; default target = -noise_dim
+  use_actor_entropy: false  # Conditional proposal entropy (before LPDS projection); default target = -noise_dim
   target_entropy_value: null  # Explicit target overrides low/SERL logic; null keeps existing defaults
   use_serl_target_entropy: false  # With actor entropy enabled, use target_entropy = -noise_dim / 2
   use_low_target_entropy: false  # With actor entropy enabled, use -2 * noise_dim; overrides use_serl_target_entropy
   use_restrain_loss: true     # Enable the residual L2 constraint and its dual loss
-  restrain_threshold: 0.35    # E[||sampled residual latent||_2] <= threshold
+  restrain_threshold: 0.35    # E[sum(actual displacement ** 2) / noise_dim] <= threshold
   init_restrain_multiplier: 1.0
   noise_chunk_length: -1
   entropy_backup: false

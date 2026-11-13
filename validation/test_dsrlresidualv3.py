@@ -33,7 +33,7 @@ def trees_equal(left, right):
         np.testing.assert_array_equal(a, b)
 
 
-def test_residual_norm_entropy_and_dual_direction():
+def test_residual_squared_cost_entropy_and_dual_direction():
     class Network:
         def select(self, name):
             if name == 'critic':
@@ -43,24 +43,26 @@ def test_residual_norm_entropy_and_dual_direction():
             return lambda **kwargs: jnp.float32(1)
     config = dict(q_agg='min', online_log_std_min=None, online_log_std_max=None,
                   use_restrain_loss=True, restrain_threshold=.35,
-                  use_actor_entropy=True, target_entropy=-2)
+                  use_actor_entropy=True, target_entropy=-2, noise_dim=2)
     batch = dict(observations=jnp.zeros((1, 3)))
     agent = SimpleNamespace(config=config, actor_network=Network(), critic_network=Network())
-    def sample(obs, rng, params):
+    def sample(obs, rng, params, with_log_prob=False):
         residual = params['residual'][None]
         base = jnp.full_like(residual, 100.)
         dist = distrax.MultivariateNormalDiag(jnp.zeros_like(residual),
                                               jnp.full_like(residual, .2))
-        return base + residual, base, residual, dist
+        result = (base + residual, base, residual, dist)
+        return (*result, dist.log_prob(residual)) if with_log_prob else result
     agent._sample_latents = sample
     def loss(params):
         return DSRLResidualV3Agent.actor_loss(agent, batch, params, jax.random.key(0))
     for residual, norm in (([.12, .16], .2), ([.36, .48], .6), ([3., 4.], 5.)):
         params = dict(multiplier=jnp.float32(1), residual=jnp.array(residual))
         (_, info), gradient = jax.value_and_grad(loss, has_aux=True)(params)
-        np.testing.assert_allclose(info['restrain_loss'], norm, atol=1e-6)
-        np.testing.assert_allclose(gradient['multiplier'], .35 - norm, atol=1e-6)
-        np.testing.assert_allclose(gradient['residual'], np.array(residual) / norm, atol=1e-6)
+        cost = np.sum(np.square(residual)) / 2
+        np.testing.assert_allclose(info['restrain_loss'], cost, atol=1e-6)
+        np.testing.assert_allclose(gradient['multiplier'], .35 - cost, atol=1e-6)
+        np.testing.assert_allclose(gradient['residual'], np.array(residual), atol=1e-6)
         expected_entropy = 2 * (.5 * np.log(2 * np.pi * np.e) + np.log(.2))
         np.testing.assert_allclose(info['entropy'], expected_entropy, atol=1e-6)
         np.testing.assert_allclose(info['actor_loss'], -expected_entropy, atol=1e-6)
